@@ -4,6 +4,7 @@
 
 ## 正式入口
 
+- GitHub Pages 官网镜像：https://simonchenjh98.github.io/chuyi-ai-hackathon-2026/
 - 官网：https://8.141.114.201/chuyi/
 - 路演评委：https://8.141.114.201/chuyi/platform.html#judge-roadshow
 - 决赛评委：https://8.141.114.201/chuyi/platform.html#judge-final
@@ -22,7 +23,7 @@ $env:CHUYI_PUBLIC_ORIGIN = 'http://127.0.0.1:5275'
 python -B server/app.py
 ```
 
-访问 http://127.0.0.1:5275/chuyi/ 。首次运行的管理码在指定数据目录 admin-access.txt。请勿提交、公开运行数据或邀请码。云端部署见 deploy/README.md。GitHub Pages 只支持静态信息页，本项目应完整部署 Python 服务才能使用评分。
+访问 http://127.0.0.1:5275/chuyi/ 。首次运行的管理码在指定数据目录 admin-access.txt。请勿提交、公开运行数据或邀请码。云端部署见 deploy/README.md。GitHub Pages 镜像只展示活动官网，其评委与成绩入口会跳转到正式服务；本项目应完整部署 Python 服务才能使用评分。
 
 ## 评审流程
 

@@ -140,6 +140,14 @@ function browserHarness({hash='#admin', confirm=()=>false, fetch}={}) {
   return {context, nodes, requests, element, run:code=>vm.runInContext(code,context), dispatch:name=>listeners.get(name)?.()};
 }
 
+test('shared judge login only offers identities from the current stage', () => {
+  const h=browserHarness({hash:'#judge-final'});
+  const accounts="[{id:'R1',name:'路演一',judgeStage:'roadshow'},{id:'F1',name:'决赛一',judgeStage:'final'},{id:'F2',name:'决赛二',judgeStage:'final'}]";
+  assert.equal(h.run(`JSON.stringify(selectableAccounts('judge',${accounts},'final').map(a=>a.id))`),'["F1","F2"]');
+  assert.equal(h.run(`JSON.stringify(selectableAccounts('judge',${accounts},'roadshow').map(a=>a.id))`),'["R1"]');
+  assert.equal(h.run(`selectableAccounts('admin',${accounts},'final').length`),3);
+});
+
 test('canceling dirty hash navigation preserves the current scores and restores the route', async () => {
   let confirmations=0;
   const h=browserHarness({hash:'#judge-roadshow', confirm:()=>{confirmations++;return false;}});

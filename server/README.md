@@ -10,4 +10,6 @@ GET /api/judge/roadshow、/api/judge/final 返回本阶段队伍、myScores、di
 
 管理员 GET /api/admin；POST /api/admin/settings、teams、invitations、revoke、qualify、unqualify、awards；GET /api/admin/export 导出两阶段CSV。invitations 使用 role=judge 和 judgeStage。qualify 在边界同分时需要严格N个teamIds；awards 使用 awardId 和 teamId，限当前最高分候选。所有操作校验阶段和状态并写审计日志。
 
+正式活动可在私有数据目录放置 `shared-login-codes.json`，以 `{"judge":"六位或更长邀请码"}` 为所有评委启用统一邀请码。登录后仍需选择独立评委身份，路演与决赛身份及评分互不混用；配置文件不得提交到 Git。
+
 可保留原观众接口供后续扩展，官网不开放观众投票，观众票不计入任何评审成绩。

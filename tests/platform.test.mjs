@@ -15,7 +15,7 @@ function renderer(screen = false, elapsed = 0, stage = 'roadshow') {
   vm.runInContext(source + `\nscreenStarted = Date.now() - ${elapsed}; boardStage = ${JSON.stringify(stage)}; globalThis.render = boardMarkup;`, context);
   return data => context.render(data);
 }
-const cfg = {minJudges:5, resultsPublished:true, scoringOpen:true};
+const cfg = {minJudges:1, resultsPublished:true, scoringOpen:true};
 const team = (n, extra = {}) => ({id:`T${n}`,number:n,name:`TEAM-${n}`,project:'project',judgeCount:5,score:80,rank:n,audienceVotes:0,...extra});
 
 test('board presents rank order, then waiting teams, preserving a zero score', () => {
@@ -24,6 +24,14 @@ test('board presents rank order, then waiting teams, preserving a zero score', (
   assert.ok(html.indexOf('TEAM-3') < html.indexOf('TEAM-1'));
   assert.match(html,/0\.00/);
   assert.match(html,/等待评审/);
+});
+
+test('roadshow board explains unlimited judges and shows one submitted score as effective', () => {
+  const html = renderer()({teams:[team(1,{judgeCount:1,score:80,rank:1})],config:cfg});
+  assert.match(html,/路演评委人数不限/);
+  assert.match(html,/1 位评委正式提交即生成有效均分/);
+  assert.match(html,/<td>1 位<\/td>/);
+  assert.match(html,/80\.00/);
 });
 
 test('public team text cannot inject HTML or disclose unprovided judge data', () => {
@@ -58,8 +66,8 @@ const awards = [
 ].map(([id, name], i) => ({id, name, score:91.1+i, leaders:[`T${i+1}`], winner:null, winnerConfirmed:false, tied:false}));
 function finalData() {
   return {
-    config:{...cfg, finalResultsPublished:true, finalMinJudges:3, finalScoringOpen:false},
-    finalists:Array.from({length:4}, (_, i) => team(i+1, {project:`PROJECT-${i+1}`, finalJudgeCount:3, finalScores:[91.1+i, 92.2+i, 93.3+i, 94.4+i]})),
+    config:{...cfg, finalResultsPublished:true, finalMinJudges:6, finalScoringOpen:false},
+    finalists:Array.from({length:4}, (_, i) => team(i+1, {project:`PROJECT-${i+1}`, finalJudgeCount:6, finalScores:[91.1+i, 92.2+i, 93.3+i, 94.4+i]})),
     awards:awards.map(a=>({...a, leaders:[...a.leaders]})),
   };
 }
@@ -103,7 +111,7 @@ test('confirmed final award shows the chosen winner and project rather than all 
 
 function browserHarness({hash='#admin', confirm=()=>false, fetch}={}) {
   const nodes = new Map(), listeners = new Map(), requests = [];
-  const fields = {activeStage:'roadshow', finalistCount:'6', minJudges:'3', finalMinJudges:'3'};
+  const fields = {activeStage:'roadshow', finalistCount:'6', minJudges:'1', finalMinJudges:'6'};
   function element(id) {
     if(nodes.has(id)) return nodes.get(id);
     const controls = new Map();
@@ -123,7 +131,7 @@ function browserHarness({hash='#admin', confirm=()=>false, fetch}={}) {
   const data = {
     teams:[], judges:[], awards:[], finalists:[], myScores:[], dimensions:[],
     qualification:{confirmed:false, ready:false},
-    config:{activeStage:'roadshow', finalistCount:6, minJudges:3, finalMinJudges:3},
+    config:{activeStage:'roadshow', finalistCount:6, minJudges:1, finalMinJudges:6},
   };
   const context = vm.createContext({
     document:{getElementById:element, querySelectorAll:()=>[], body:{classList:{contains:()=>false, remove(){}, toggle(){}}}},
@@ -169,7 +177,7 @@ test('canceling dirty hash navigation preserves the current scores and restores 
 test('a settings save that completes after navigation cannot replace the new board page', async () => {
   let finishPost, startPost;
   const postStarted=new Promise(resolve=>{startPost=resolve;});
-  const adminData={teams:[],judges:[],awards:[],finalists:[],qualification:{confirmed:false,ready:false},config:{activeStage:'roadshow',finalistCount:6,minJudges:3,finalMinJudges:3}};
+  const adminData={teams:[],judges:[],awards:[],finalists:[],qualification:{confirmed:false,ready:false},config:{activeStage:'roadshow',finalistCount:6,minJudges:1,finalMinJudges:6}};
   const h=browserHarness({fetch:async(url)=>{
     if(url.pathname.endsWith('/api/admin/settings')){
       startPost();

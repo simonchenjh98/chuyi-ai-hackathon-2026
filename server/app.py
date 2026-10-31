@@ -146,10 +146,10 @@ class EventService:
             db.executescript(SCHEMA)
             if "judge_stage" not in {r["name"] for r in db.execute("PRAGMA table_info(accounts)")}:
                 db.execute("ALTER TABLE accounts ADD COLUMN judge_stage TEXT NOT NULL DEFAULT 'roadshow'")
-            for key, value in {"scoringOpen": False, "resultsPublished": True, "minJudges": 3,
+            for key, value in {"scoringOpen": False, "resultsPublished": True, "minJudges": 1,
                                "activeStage": "roadshow", "finalistCount": 6,
                                "finalScoringOpen": False, "finalResultsPublished": True,
-                               "finalMinJudges": 3, "qualificationVersion": 0, "updatedAt": now_ms()}.items():
+                               "finalMinJudges": 6, "qualificationVersion": 0, "updatedAt": now_ms()}.items():
                 db.execute("INSERT OR IGNORE INTO settings VALUES (?,?)", (key, json.dumps(value)))
             if not db.execute("SELECT 1 FROM accounts WHERE role='admin'").fetchone():
                 account, code = self.create_account(db, "admin", "活动管理员")

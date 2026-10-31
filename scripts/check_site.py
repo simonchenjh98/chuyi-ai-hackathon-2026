@@ -1,4 +1,5 @@
 """Validate public page resources and navigation without a browser."""
+import json
 from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import urlsplit, unquote
@@ -42,4 +43,10 @@ for file in ('index.html', 'platform.html'):
             assert url.fragment in destination.ids, f'Missing anchor: {ref}'
     for tab in page.tabs:
         assert tab in page.ids, f'Missing schedule panel: {tab}'
-print('Public resources, anchors, schedule panels and HTTPS links: passed')
+
+teams = json.loads((ROOT / 'event-data' / 'teams.public.json').read_text(encoding='utf-8'))
+assert len(teams) == 22 and [team['number'] for team in teams] == list(range(1, 23)), 'Expected public teams 1 through 22'
+assert all(set(team) == {'number', 'name', 'project', 'track'} for team in teams), 'Public team data contains unexpected fields'
+assert all(team['name'].strip() and team['project'].strip() for team in teams), 'Public team names and projects are required'
+assert all(team['track'] in {'现实问题', '帮助学习', '研究探索', '创意小游戏', '待确认'} for team in teams), 'Unexpected public track'
+print('Public resources, anchors, schedule panels, team data and HTTPS links: passed')

@@ -96,7 +96,8 @@ class APITests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(board["teams"], [])
         self.assertEqual([d["max"] for d in board["config"]["dimensions"]], [20, 20, 20, 15, 15, 10])
-        self.assertEqual(board["config"]["minJudges"], 3)
+        self.assertEqual(board["config"]["minJudges"], 1)
+        self.assertEqual(board["config"]["finalMinJudges"], 6)
         self.assertFalse(board["config"]["scoringOpen"])
         self.assertTrue(board["config"]["resultsPublished"])
         with closing(sqlite3.connect(self.service.db_path)) as db:
@@ -154,6 +155,7 @@ class APITests(unittest.TestCase):
         self.assertIsNone(row["rank"])
         self.assertEqual(save(judges[4], full)[0], 200)
         self.assertEqual(self.public.get("/api/board")[1]["teams"][0]["score"], 96)
+
         self.assertEqual(save(judges[0], sixty)[0], 200)
         self.assertEqual(self.public.get("/api/board")[1]["teams"][0]["score"], 92)
         self.assertEqual(save(judges[0], full, "draft")[0], 409)
@@ -176,6 +178,20 @@ class APITests(unittest.TestCase):
         for state in ["submitted", "draft", "recused"]:
             self.assertEqual(save(judges[0], full, state)[0], 409)
         self.assertEqual(self.public.get("/api/board")[1]["teams"][0]["score"], 92)
+
+    def test_default_roadshow_score_is_live_after_one_judge_and_then_averages(self):
+        team_id = self.team()
+        self.open()
+        first = self.invitation(name="FIRST_LIVE_JUDGE")[0]
+        second = self.invitation(name="SECOND_LIVE_JUDGE")[0]
+        eighty = [16, 16, 16, 12, 12, 8]
+        full = [20, 20, 20, 15, 15, 10]
+        self.assertEqual(first.post("/api/score", {"teamId": team_id, "scores": eighty, "status": "submitted"})[0], 200)
+        row = self.public.get("/api/board")[1]["teams"][0]
+        self.assertEqual((row["judgeCount"], row["score"]), (1, 80))
+        self.assertEqual(second.post("/api/score", {"teamId": team_id, "scores": full, "status": "submitted"})[0], 200)
+        row = self.public.get("/api/board")[1]["teams"][0]
+        self.assertEqual((row["judgeCount"], row["score"]), (2, 90))
 
     def test_validation_and_body_limits(self):
         team_id = self.team()

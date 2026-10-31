@@ -6,6 +6,8 @@ Python 3.11+ 标准库。环境变量 CHUYI_DATA_DIR、CHUYI_BASE_PATH（默认 
 
 公开 GET /api/board 返回路演排名、qualification、finalists 和 awards；隐藏成绩时去除对应分数、资格与获奖信息。GET /api/session 查询身份。POST /api/login /api/logout 登录退出。
 
+路演默认 `minJudges=1`：评委身份数量不设上限，一位评委正式提交后即产生有效分；后续每增加一份正式评分，平台对全部有效分重新求平均并由看板轮询显示。决赛默认 `finalMinJudges=6`，每支入围队伍达到六位有效评委后才形成四奖均分。
+
 GET /api/judge/roadshow、/api/judge/final 返回本阶段队伍、myScores、dimensions、scoringOpen。POST /api/score 必须 stage、teamId、status（draft/submitted/recused），非回避时填写本阶段全部 scores；feedback 可选。
 
 管理员 GET /api/admin；POST /api/admin/settings、teams、invitations、revoke、qualify、unqualify、awards；GET /api/admin/export 导出两阶段CSV。invitations 使用 role=judge 和 judgeStage。qualify 在边界同分时需要严格N个teamIds；awards 使用 awardId 和 teamId，限当前最高分候选。所有操作校验阶段和状态并写审计日志。

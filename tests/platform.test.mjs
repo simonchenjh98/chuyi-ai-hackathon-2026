@@ -63,27 +63,35 @@ test('unpublished scores and an empty event have explicit states', () => {
 const awards = [
   ['creativity', '最佳创意奖'], ['technology', '最佳技术实现奖'],
   ['potential', '最具应用潜力奖'], ['care', '最具社会关怀奖'],
-].map(([id, name], i) => ({id, name, score:91.1+i, leaders:[`T${i+1}`], winner:null, winnerConfirmed:false, tied:false}));
+].map(([id, name], i) => ({id, name, max:150, score:150-i*5, leaders:[`T${i+1}`], winner:null, winnerConfirmed:false, tied:false, ready:true}));
 function finalData() {
+  const totals=[[150,100,100,100],[110,145,110,110],[120,120,140,120],[125,125,125,135]];
   return {
-    config:{...cfg, finalResultsPublished:true, finalMinJudges:6, finalScoringOpen:false},
-    finalists:Array.from({length:4}, (_, i) => team(i+1, {project:`PROJECT-${i+1}`, finalJudgeCount:6, finalScores:[91.1+i, 92.2+i, 93.3+i, 94.4+i]})),
+    config:{...cfg, finalResultsPublished:true, finalMinJudges:6, finalJudgeLimit:6, finalScoringOpen:false},
+    finalists:totals.map((scores,i)=>team(i+1,{project:`PROJECT-${i+1}`,finalJudgeCount:6,finalReady:true,finalTotals:scores,finalTotal:scores.reduce((a,b)=>a+b,0),finalScores:scores.map(n=>n/6)})),
     awards:awards.map(a=>({...a, leaders:[...a.leaders]})),
+    mvp:{id:'mvp',name:'全场MVP',score:510,max:600,leaders:['T4'],winner:null,winnerConfirmed:false,tied:false,ready:true},
   };
 }
 const cards = html => [...html.matchAll(/<article class="surface award-card">([\s\S]*?)<\/article>/g)].map(m=>m[1]);
 
-test('final board presents four independent award scores and candidates', () => {
+test('final board presents four summed awards out of 150 and a separate MVP out of 600', () => {
   const html = renderer(false, 0, 'final')(finalData());
   const rendered = cards(html);
   assert.equal(rendered.length, 4);
   awards.forEach((award, i) => {
     assert.ok(rendered[i].includes(`<h2>${award.name}</h2>`));
     assert.ok(rendered[i].includes(`<strong class="award-winner">TEAM-${i+1}</strong>`));
-    assert.ok(rendered[i].includes(`${award.score.toFixed(2)}<small> / 100</small>`));
+    assert.ok(rendered[i].includes(`${award.score.toFixed(2)}<small> / 150</small>`));
     assert.match(rendered[i], /当前最高分候选/);
   });
-  assert.match(html, /四个方向分别评选/);
+  assert.match(html, /全场MVP/);
+  assert.match(html, /510\.00<small> \/ 600<\/small>/);
+  assert.match(html, /单项满分 150 分/);
+  assert.match(html, /MVP 总分 \/ 600/);
+  assert.match(html, /6 \/ 6 位 · 已完成/);
+  assert.match(html, /<td>150\.00<\/td>/);
+  assert.ok(!html.includes('<td>25.00</td>')); // The board must not reuse the retained per-judge mean.
   assert.ok(!html.includes('路演总分'));
   assert.ok(!html.includes('获奖已确认'));
 });
@@ -109,14 +117,56 @@ test('confirmed final award shows the chosen winner and project rather than all 
   assert.ok(!card.includes('当前最高分候选'));
 });
 
+test('one final submission shows interim sums and progress rather than waiting for six means', () => {
+  const data=finalData();
+  data.finalists=data.finalists.slice(0,1).map(t=>({...t,finalJudgeCount:1,finalReady:false,finalTotals:[0,21,22,23],finalTotal:66,finalScores:[null,null,null,null]}));
+  data.awards=data.awards.map((a,i)=>({...a,score:[0,21,22,23][i],leaders:['T1'],ready:false}));
+  data.mvp={...data.mvp,score:66,leaders:['T1'],ready:false};
+  const html=renderer(false,0,'final')(data);
+  assert.match(html,/66\.00<small> \/ 600<\/small>/);
+  assert.match(html,/0\.00<small> \/ 150<\/small>/);
+  assert.match(html,/1 \/ 6 位 · 未完成/);
+  assert.match(html,/阶段累计 · 尚未定稿/);
+  assert.match(html,/待其余评委提交/);
+  assert.ok(!html.includes('获奖已确认'));
+});
+
+test('final screen rotates compact awards and the complete finalist table every twelve seconds', () => {
+  const data=finalData();
+  data.finalists=Array.from({length:8},(_,i)=>({...data.finalists[i%4],id:`T${i+1}`,number:i+1,name:`TEAM-${i+1}`}));
+  const awardsPage=renderer(true,0,'final')(data),tablePage=renderer(true,13000,'final')(data);
+  assert.match(awardsPage,/第 1 \/ 2 屏/);
+  assert.match(awardsPage,/全场MVP/);
+  assert.equal(cards(awardsPage).length,4);
+  assert.ok(!awardsPage.includes('final-table'));
+  assert.match(tablePage,/第 2 \/ 2 屏/);
+  assert.match(tablePage,/final-table/);
+  assert.match(tablePage,/TEAM-8/);
+  assert.equal(cards(tablePage).length,0);
+  assert.ok(!awardsPage.includes('class="metrics"'));
+  assert.ok(!tablePage.includes('class="info-banner"'));
+});
+
+test('hidden final results never fall back to retained per-judge means', () => {
+  const data=finalData();data.config.finalResultsPublished=false;
+  data.finalists=data.finalists.map(t=>({...t,finalTotals:[null,null,null,null],finalTotal:null}));
+  data.awards=data.awards.map(a=>({...a,score:null,leaders:[],winner:null,winnerConfirmed:false,ready:false}));
+  data.mvp={...data.mvp,score:null,leaders:[],winner:null,winnerConfirmed:false,ready:false};
+  const html=renderer(false,0,'final')(data);
+  assert.match(html,/决赛成绩暂未发布/);
+  assert.match(html,/—<small> \/ 600<\/small>/);
+  assert.ok(!html.includes('510.00'));
+  assert.ok(!html.includes('<td>25.00</td>'));
+});
+
 function browserHarness({hash='#admin', confirm=()=>false, fetch}={}) {
-  const nodes = new Map(), listeners = new Map(), requests = [];
+  const nodes = new Map(), listeners = new Map(), requests = [], timers=new Map();let timerId=0;
   const fields = {activeStage:'roadshow', finalistCount:'6', minJudges:'1', finalMinJudges:'6'};
   function element(id) {
     if(nodes.has(id)) return nodes.get(id);
     const controls = new Map();
     const node = {
-      innerHTML:'', textContent:'', disabled:false, isConnected:true,
+      innerHTML:'', textContent:'', disabled:false, isConnected:true, hidden:id==='identity-field',reportValidity:()=>true,
       classList:{contains:()=>false, add(){}, remove(){}, toggle(){}},
       elements:new Proxy({}, {get:(_, key)=>{
         if(!controls.has(key)) controls.set(key, {value:fields[key]||'', checked:false});
@@ -137,7 +187,7 @@ function browserHarness({hash='#admin', confirm=()=>false, fetch}={}) {
     document:{getElementById:element, querySelectorAll:()=>[], body:{classList:{contains:()=>false, remove(){}, toggle(){}}}},
     location:{href:`https://example.test/chuyi/platform.html${hash}`, hash},
     window:{addEventListener:(name,handler)=>listeners.set(name,handler)},
-    URL, Date, setTimeout:()=>0, clearTimeout(){}, confirm,
+    URL, Date, AbortController, setTimeout:(callback,delay)=>{timers.set(++timerId,{callback,delay});return timerId;},clearTimeout:id=>timers.delete(id),confirm,
     fetch:async(url,options)=>{
       requests.push({path:url.pathname, options});
       const result = fetch ? await fetch(url,options) : data;
@@ -145,7 +195,7 @@ function browserHarness({hash='#admin', confirm=()=>false, fetch}={}) {
     },
   });
   vm.runInContext(eventSource,context);
-  return {context, nodes, requests, element, run:code=>vm.runInContext(code,context), dispatch:name=>listeners.get(name)?.()};
+  return {context,nodes,requests,element,timers,run:code=>vm.runInContext(code,context),dispatch:name=>listeners.get(name)?.(),fireTimer:delay=>{const entry=[...timers].find(([,timer])=>timer.delay===delay);assert.ok(entry,`Expected a ${delay}ms timer`);timers.delete(entry[0]);return entry[1].callback();}};
 }
 
 test('shared judge login only offers identities from the current stage', () => {
@@ -154,6 +204,152 @@ test('shared judge login only offers identities from the current stage', () => {
   assert.equal(h.run(`JSON.stringify(selectableAccounts('judge',${accounts},'final').map(a=>a.id))`),'["F1","F2"]');
   assert.equal(h.run(`JSON.stringify(selectableAccounts('judge',${accounts},'roadshow').map(a=>a.id))`),'["R1"]');
   assert.equal(h.run(`selectableAccounts('admin',${accounts},'final').length`),3);
+});
+
+test('shared final login selects a final identity and opens the matching judge workbench', async () => {
+  const logins=[];
+  const h=browserHarness({hash:'#judge-final',fetch:async(url,options)=>{
+    if(url.pathname.endsWith('/api/login')){
+      const body=JSON.parse(options.body);logins.push(body);
+      return body.accountId?{ok:true}:{selectAccount:true,accounts:[{id:'R1',name:'ROADSHOW ONLY',judgeStage:'roadshow'},{id:'F1',name:'FINAL JUDGE',judgeStage:'final'}]};
+    }
+    if(url.pathname.endsWith('/api/session'))return {role:'judge',name:'FINAL JUDGE',judgeStage:'final'};
+    return {teams:[],myScores:[],dimensions:[],scoringOpen:true,name:'FINAL JUDGE'};
+  }});
+  await h.run('renderRoute()');
+  const form=h.element('login-form');form.elements.code.value='000000';
+  await form.onsubmit({preventDefault(){}});
+  assert.equal(h.element('identity-field').hidden,false);
+  assert.ok(form.elements.accountId.innerHTML.includes('FINAL JUDGE'));
+  assert.ok(!form.elements.accountId.innerHTML.includes('ROADSHOW ONLY'));
+  form.elements.accountId.value='F1';
+  await form.onsubmit({preventDefault(){}});
+  assert.deepEqual(logins,[{role:'judge',code:'000000'},{role:'judge',code:'000000',accountId:'F1'}]);
+  assert.equal(h.run('session.judgeStage'),'final');
+  assert.equal(h.run('route'),'judge-final');
+  assert.match(h.element('platform-main').innerHTML,/决赛评委工作台/);
+  assert.ok(h.requests.some(r=>r.path.endsWith('/api/judge/final')));
+  assert.ok(!h.requests.some(r=>r.path.endsWith('/api/judge/roadshow')));
+});
+
+test('a roadshow identity cannot render or request the final judge editor', async () => {
+  const h=browserHarness({hash:'#judge-final'});
+  h.run("session={role:'judge',judgeStage:'roadshow'};");
+  await h.run('renderRoute()');
+  assert.match(h.element('platform-main').innerHTML,/当前身份是路演评委/);
+  assert.match(h.element('platform-main').innerHTML,/#judge-roadshow/);
+  assert.equal(h.requests.length,0);
+});
+
+test('organizer can confirm MVP and four awards only after complete judging and closure', () => {
+  const h=browserHarness(),data=finalData();
+  let html=h.run(`awardAdminMarkup(${JSON.stringify(data)})`);
+  assert.equal((html.match(/data-award-form=/g)||[]).length,5);
+  assert.match(html,/data-award-form="mvp"/);
+  assert.match(html,/510\.00 \/ 600 分/);
+  assert.match(html,/150\.00 \/ 150 分/);
+  assert.ok(!html.includes('type="submit" disabled'));
+  data.config.finalScoringOpen=true;
+  data.mvp.ready=false;data.awards.forEach(a=>a.ready=false);
+  html=h.run(`awardAdminMarkup(${JSON.stringify(data)})`);
+  assert.equal((html.match(/type="submit" disabled/g)||[]).length,5);
+});
+
+function mountFinalEditor(h,values=[25,25,25,25]) {
+  const form=h.element('score-form');values.forEach((value,i)=>{form.elements[`score${i}`].value=String(value);});
+  const data={teams:[team(1),team(2)],myScores:[{teamId:'T1',scores:values,status:'draft',feedback:''}],dimensions:awards.map(a=>({id:a.id,name:a.name,max:25})),scoringOpen:true};
+  h.run(`session={role:'judge',judgeStage:'final'};route='judge-final';judgeStage='final';routeVersion=1;judgeData=${JSON.stringify(data)};selectedTeam='T1';renderJudgeEditor();`);
+  return form;
+}
+
+test('final judge scores each dimension out of 25 and submits a personal total out of 100', async () => {
+  let submitted;
+  const h=browserHarness({hash:'#judge-final',fetch:async(url,options)=>{
+    if(url.pathname.endsWith('/api/score')){submitted=JSON.parse(options.body);return {ok:true};}
+    throw new Error('RELOAD OFFLINE');
+  }});
+  const form=mountFinalEditor(h);
+  assert.equal((h.element('judge-editor').innerHTML.match(/max="25"/g)||[]).length,8);
+  assert.match(h.element('score-total').innerHTML,/100\.0 <small>\/ 100<\/small>/);
+  form.elements.score0.value='25.1';form.reportValidity=()=>false;
+  await form.onsubmit({preventDefault(){}});
+  assert.equal(h.requests.length,0);
+  form.elements.score0.value='25';form.reportValidity=()=>true;form.oninput();
+  await form.onsubmit({preventDefault(){}});
+  assert.deepEqual(submitted.scores,[25,25,25,25]);
+  assert.equal(submitted.stage,'final');
+  assert.equal(submitted.teamId,'T1');
+  assert.equal(h.run('editorDirty'),false);
+  assert.equal(form.elements.score0.value,'25');
+  assert.match(h.element('platform-toast').textContent,/刷新失败：RELOAD OFFLINE/);
+});
+
+test('edits entered during a slow score submission survive its successful completion', async () => {
+  let finish,start;const started=new Promise(resolve=>{start=resolve;});
+  const h=browserHarness({hash:'#judge-final',fetch:async(url)=>{
+    assert.ok(url.pathname.endsWith('/api/score'));
+    start();return new Promise(resolve=>{finish=()=>resolve({ok:true});});
+  }});
+  const form=mountFinalEditor(h,[20,20,20,20]);form.oninput();
+  const saving=form.onsubmit({preventDefault(){}});await started;
+  form.elements.score0.value='23';form.oninput();
+  await h.element('save-draft').onclick({currentTarget:h.element('save-draft')});
+  assert.equal(h.requests.length,1); // A second action cannot overtake the pending submission.
+  finish();await saving;
+  assert.equal(form.elements.score0.value,'23');
+  assert.equal(h.run('editorDirty'),true);
+  assert.equal(h.run('scoreSavePending'),false);
+  assert.match(h.element('platform-toast').textContent,/你之后的修改尚未保存/);
+  assert.equal(h.requests.length,1); // No refresh can replace the newer local values.
+});
+
+test('edits entered while a manual reload is pending cannot be replaced by its older response', async () => {
+  let finish,start;const started=new Promise(resolve=>{start=resolve;});
+  const h=browserHarness({hash:'#judge-final',fetch:async()=>{
+    start();return new Promise(resolve=>{finish=()=>resolve({teams:[],myScores:[],dimensions:[],scoringOpen:true});});
+  }});
+  const form=mountFinalEditor(h,[20,20,20,20]);form.oninput();
+  const reloading=h.run('refreshJudgeIfCurrent(1,true)');await started;
+  form.elements.score0.value='24';form.oninput();
+  finish();await reloading;
+  assert.equal(form.elements.score0.value,'24');
+  assert.equal(h.run('editorDirty'),true);
+  assert.equal(h.run('judgeData.teams.length'),2);
+});
+
+test('GET and POST requests time out and uncertain writes are not automatically retried', async () => {
+  const h=browserHarness({fetch:async(_url,options)=>new Promise((_resolve,reject)=>{
+    options.signal.addEventListener('abort',()=>reject(Object.assign(new Error('Aborted'),{name:'AbortError'})));
+  })});
+  const reading=h.run("api('board')");h.fireTimer(15000);
+  await assert.rejects(reading,/连接超时/);
+  const saving=h.run("api('score',{stage:'final'})");h.fireTimer(15000);
+  await assert.rejects(saving,/操作可能已送达/);
+  assert.equal(h.requests.length,2);
+  assert.equal(h.timers.size,0);
+});
+
+test('board polling waits for each request, preserves stale data, then recovers automatically', async () => {
+  let calls=0,finish;const data=finalData();
+  const h=browserHarness({hash:'#board-final',fetch:async()=>{
+    calls++;
+    if(calls===1)return new Promise(resolve=>{finish=()=>resolve(data);});
+    if(calls===2)throw new Error('OFFLINE');
+    return {...data,mvp:{...data.mvp,score:520}};
+  }});
+  h.run("route='board-final';boardStage='final';routeVersion=1;");
+  const initial=h.run('renderBoard(1)');
+  assert.equal(calls,1);
+  assert.ok(![...h.timers.values()].some(t=>t.delay===2000));
+  finish();await initial;
+  const original=h.element('board-content').innerHTML;
+  await h.fireTimer(2000);
+  assert.equal(h.element('board-content').innerHTML,original);
+  assert.match(h.element('live-status').textContent,/显示上次数据，正在重试/);
+  await h.fireTimer(2000);
+  assert.match(h.element('board-content').innerHTML,/520\.00/);
+  assert.match(h.element('live-status').innerHTML,/已连接/);
+  assert.equal(calls,3);
 });
 
 test('canceling dirty hash navigation preserves the current scores and restores the route', async () => {
@@ -237,8 +433,9 @@ test('failed manual refresh preserves existing data and reports the connection f
   await h.run('refreshAdminIfCurrent(3)');
   assert.equal(h.element('platform-main').innerHTML,'EXISTING ADMIN DATA');
   assert.match(h.element('platform-toast').textContent,/刷新失败：OFFLINE/);
-  h.run("route='judge-roadshow';root.innerHTML='EXISTING JUDGE DATA';");
-  await h.run('refreshJudgeIfCurrent(3)');
+  h.run("route='judge-roadshow';editorDirty=true;root.innerHTML='EXISTING JUDGE DATA';");
+  await h.run('refreshJudgeIfCurrent(3,true)');
   assert.equal(h.element('platform-main').innerHTML,'EXISTING JUDGE DATA');
+  assert.equal(h.run('editorDirty'),true);
   assert.match(h.element('platform-toast').textContent,/刷新失败：OFFLINE/);
 });

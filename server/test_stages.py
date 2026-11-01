@@ -124,13 +124,15 @@ class TwoStageTests(unittest.TestCase):
         final2, invitation2 = self.invitation("final", "PRIVATE FINAL 2")
         self.settings(activeStage="final", finalScoringOpen=True, finalMinJudges=2)
         self.assertEqual(len(final1.get("/api/judge/final")[1]["teams"]), 6)
-        self.assertEqual(self.score(final1, ids[6], [90] * 4, "final")[0], 403)
+        self.assertEqual(self.score(final1, ids[6], [20] * 4, "final")[0], 403)
         # Two top teams tie on creativity and technology; first wins both remaining directions.
-        scores = [[90, 95, 99, 98], [90, 95, 80, 75]] + [[60, 60, 60, 60]] * 4
+        scores = [[22, 23, 25, 24], [22, 23, 20, 19]] + [[15, 15, 15, 15]] * 4
         for team, values in zip(ids[:6], scores):
             self.assertEqual(self.score(final1, team, values, "final")[0], 200)
             self.assertEqual(self.score(final2, team, values, "final", "draft")[0], 200)
         self.assertTrue(all(t["finalScores"] == [None] * 4 for t in self.public.get("/api/board")[1]["finalists"]))
+        self.assertEqual(self.public.get("/api/board")[1]["finalists"][0]["finalTotals"], scores[0])
+        self.assertEqual(self.public.get("/api/board")[1]["mvp"]["score"], 94)
         self.assertEqual(self.admin.post("/api/admin/awards", {"awardId": AWARDS[0]["id"], "teamId": ids[0]})[0], 409)
         self.settings(finalScoringOpen=False)
         self.assertEqual(self.admin.post("/api/admin/awards", {"awardId": AWARDS[0]["id"], "teamId": ids[0]})[0], 409)
@@ -155,7 +157,10 @@ class TwoStageTests(unittest.TestCase):
         self.settings(finalResultsPublished=False)
         hidden = self.public.get("/api/board")[1]
         self.assertTrue(all(t["finalScores"] == [None] * 4 for t in hidden["finalists"]))
+        self.assertTrue(all(t["finalTotals"] == [None] * 4 and t["finalTotal"] is None for t in hidden["finalists"]))
         self.assertTrue(all(a["leaders"] == [] and a["winner"] is None and a["score"] is None for a in hidden["awards"]))
+        self.assertIsNone(hidden["mvp"]["score"])
+        self.assertEqual(hidden["mvp"]["leaders"], [])
         self.assertTrue(self.admin.get("/api/admin")[1]["awards"][0]["winnerConfirmed"])
         self.settings(resultsPublished=False)
         hidden = self.public.get("/api/board")[1]
@@ -168,8 +173,8 @@ class TwoStageTests(unittest.TestCase):
         self.settings(finalScoringOpen=True, resultsPublished=True, finalResultsPublished=True)
         self.assertTrue(all(not a["winnerConfirmed"] for a in self.admin.get("/api/admin")[1]["awards"]))
         self.assertEqual(self.admin.post("/api/admin/unqualify", {})[0], 409)
-        self.assertEqual(self.score(final1, ids[0], [100, 100, 100, 100], "final")[0], 200)
-        for invalid in [[101, 0, 0, 0], [0] * 6, [True, 0, 0, 0], [0.01, 0, 0, 0]]:
+        self.assertEqual(self.score(final1, ids[0], [25, 25, 25, 25], "final")[0], 200)
+        for invalid in [[25.1, 0, 0, 0], [100, 0, 0, 0], [-0.1, 0, 0, 0], [0] * 6, [True, 0, 0, 0], [0.01, 0, 0, 0]]:
             self.assertEqual(self.score(final1, ids[0], invalid, "final")[0], 400)
         status, content, _ = self.admin.get("/api/admin/export")
         self.assertEqual(status, 200)
@@ -177,6 +182,7 @@ class TwoStageTests(unittest.TestCase):
         self.assertEqual({r["阶段"] for r in rows}, {"路演", "决赛"})
         self.assertTrue(all(r["路演总分"] == "" for r in rows if r["阶段"] == "决赛"))
         self.assertTrue(all(a["name"] in rows[0] for a in AWARDS))
+        self.assertIn("团队MVP累计", rows[0])
 
     def test_zero_scores_recusal_and_half_up_averages(self):
         self.assertEqual(EventService.average_score(1, 4), 0.03)

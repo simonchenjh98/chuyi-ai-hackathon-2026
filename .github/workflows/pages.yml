@@ -30,6 +30,8 @@ jobs:
           node --test tests/platform.test.mjs
           python -B scripts/check_site.py
           python -B -m unittest discover -s server -p 'test_*.py'
+          python -B -m unittest discover -s deploy -p 'test_install.py'
+          python -B scripts/check_concurrency.py
       - name: Stage public files
         run: |
           mkdir _site

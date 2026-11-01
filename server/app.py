@@ -31,11 +31,13 @@ DIMENSIONS = [
     {"id": "teamwork", "name": "团队协作与表达", "max": 10},
 ]
 AWARDS = [
-    {"id": "creativity", "name": "最佳创意奖", "max": 100},
-    {"id": "technology", "name": "最佳技术实现奖", "max": 100},
-    {"id": "potential", "name": "最具应用潜力奖", "max": 100},
-    {"id": "care", "name": "最具社会关怀奖", "max": 100},
+    {"id": "creativity", "name": "最佳创意奖", "max": 25},
+    {"id": "technology", "name": "最佳技术实现奖", "max": 25},
+    {"id": "potential", "name": "最具应用潜力奖", "max": 25},
+    {"id": "care", "name": "最具社会关怀奖", "max": 25},
 ]
+FINAL_JUDGE_LIMIT = 6
+FINAL_SCORING_VERSION = 2
 STAGES = {"roadshow", "final"}
 BODY_LIMIT = 16384
 SESSION_SECONDS = 12 * 3600
@@ -134,8 +136,8 @@ class EventService:
         os.chmod(self.data_dir, 0o700)
         shared_file = self.data_dir / "shared-login-codes.json"
         self.shared_login_codes = json.loads(shared_file.read_text(encoding="utf-8")) if shared_file.exists() else {}
-        if not isinstance(self.shared_login_codes, dict) or not set(self.shared_login_codes).issubset({"admin", "judge"}):
-            raise ValueError("Shared login configuration supports admin and judge roles only")
+        if not isinstance(self.shared_login_codes, dict) or not set(self.shared_login_codes).issubset({"admin", "judge", "audience"}):
+            raise ValueError("Shared login configuration supports admin, judge and audience roles only")
         for value in self.shared_login_codes.values():
             if not isinstance(value, str) or not 6 <= len(value) <= 160 or value != value.strip():
                 raise ValueError("Shared login codes must contain 6 to 160 characters")
@@ -146,6 +148,7 @@ class EventService:
             db.executescript(SCHEMA)
             if "judge_stage" not in {r["name"] for r in db.execute("PRAGMA table_info(accounts)")}:
                 db.execute("ALTER TABLE accounts ADD COLUMN judge_stage TEXT NOT NULL DEFAULT 'roadshow'")
+            self.initialize_final_scoring(db)
             for key, value in {"scoringOpen": False, "resultsPublished": True, "minJudges": 1,
                                "activeStage": "roadshow", "finalistCount": 6,
                                "finalScoringOpen": False, "finalResultsPublished": True,
@@ -195,8 +198,23 @@ class EventService:
 
     def config(self, db):
         result = {r["key"]: json.loads(r["value"]) for r in db.execute("SELECT * FROM settings")}
-        result.update(dimensions=DIMENSIONS, finalDimensions=AWARDS, voteLimit=VOTE_LIMIT, audienceIncludedInScore=False, maxScore=100, scorePrecision=2)
+        result.update(dimensions=DIMENSIONS, finalDimensions=AWARDS, voteLimit=VOTE_LIMIT,
+                      audienceIncludedInScore=False, maxScore=100, scorePrecision=2,
+                      finalJudgeLimit=FINAL_JUDGE_LIMIT, finalAwardMax=25 * FINAL_JUDGE_LIMIT,
+                      finalMvpMax=100 * FINAL_JUDGE_LIMIT, finalScoringVersion=FINAL_SCORING_VERSION)
         return result
+
+    def initialize_final_scoring(self, db):
+        """Never silently reinterpret historical ballots under a different scale."""
+        version = db.execute("SELECT value FROM settings WHERE key='finalScoringVersion'").fetchone()
+        if version is None:
+            if db.execute("SELECT 1 FROM final_scores LIMIT 1").fetchone():
+                raise RuntimeError("Existing final scores have no 25-point scale marker; explicit migration is required before startup")
+            db.execute("INSERT INTO settings VALUES ('finalScoringVersion',?)", (json.dumps(FINAL_SCORING_VERSION),))
+            db.execute("DELETE FROM award_winners")
+            self.audit(db, None, "final.scoring-version", metadata={"version": FINAL_SCORING_VERSION, "ballotAwardMax": 25})
+        elif json.loads(version["value"]) != FINAL_SCORING_VERSION:
+            raise RuntimeError("Unsupported final scoring version; explicit migration is required before startup")
 
     def touch(self, db):
         db.execute("UPDATE settings SET value=? WHERE key='updatedAt'", (json.dumps(now_ms()),))
@@ -295,34 +313,45 @@ class EventService:
         for row in db.execute("SELECT t.*,f.roadshow_score FROM finalists f JOIN teams t ON t.id=f.team_id ORDER BY f.position"):
             scores = [json.loads(r[0]) for r in db.execute("SELECT scores_json FROM final_scores WHERE team_id=? AND status='submitted'", (row["id"],))]
             count = len(scores)
-            averages = [self.average_score(sum(int(Decimal(str(v[i])) * 10) for v in scores), count) for i in range(len(AWARDS))] if count >= cfg["finalMinJudges"] else [None] * len(AWARDS)
+            tenths = [sum(int(Decimal(str(v[i])) * 10) for v in scores) for i in range(len(AWARDS))]
+            ready = count >= cfg["finalMinJudges"]
+            averages = [self.average_score(total, count) for total in tenths] if ready else [None] * len(AWARDS)
             finalists.append({"id": row["id"], "number": row["number"], "name": row["name"],
                               "project": row["project"], "track": row["track"],
                               "roadshowScore": row["roadshow_score"] if not public or cfg["resultsPublished"] else None,
-                              "finalJudgeCount": count, "finalScores": averages if visible else [None] * len(AWARDS)})
+                              "finalJudgeCount": count, "finalScores": averages if visible else [None] * len(AWARDS),
+                              "finalTotals": [total / 10 for total in tenths] if count and visible else [None] * len(AWARDS),
+                              "finalTotal": sum(tenths) / 10 if count and visible else None,
+                              "finalReady": ready and visible})
         complete = bool(finalists) and all(t["finalJudgeCount"] >= cfg["finalMinJudges"] for t in finalists)
         winners = {r["award_id"]: r["team_id"] for r in db.execute("SELECT * FROM award_winners")}
-        awards = []
-        for index, award in enumerate(AWARDS):
-            candidates = [t for t in finalists if t["finalScores"][index] is not None]
-            best = max((t["finalScores"][index] for t in candidates), default=None)
-            leaders = [t["id"] for t in candidates if t["finalScores"][index] == best] if best is not None else []
-            awards.append({**award, "score": best, "leaders": leaders,
-                           "winner": winners.get(award["id"]) if visible else None,
-                           "winnerConfirmed": visible and award["id"] in winners,
-                           "tied": len(leaders) > 1, "ready": visible and complete and not cfg["finalScoringOpen"]})
+
+        def award_result(award, value):
+            candidates = [t for t in finalists if value(t) is not None]
+            best = max((value(t) for t in candidates), default=None)
+            leaders = [t["id"] for t in candidates if value(t) == best] if best is not None else []
+            return {**award, "score": best, "leaders": leaders,
+                    "winner": winners.get(award["id"]) if visible else None,
+                    "winnerConfirmed": visible and award["id"] in winners,
+                    "tied": len(leaders) > 1, "ready": visible and complete and not cfg["finalScoringOpen"]}
+
+        awards = [award_result({**award, "max": 25 * FINAL_JUDGE_LIMIT, "ballotMax": 25},
+                              lambda t, i=index: t["finalTotals"][i]) for index, award in enumerate(AWARDS)]
+        mvp = award_result({"id": "mvp", "name": "全场MVP", "max": 100 * FINAL_JUDGE_LIMIT}, lambda t: t["finalTotal"])
         # An unannounced roadshow result must not leak through the final roster or award candidates.
         if public and not cfg["resultsPublished"]:
             finalists = []
             awards = [{**a, "score": None, "leaders": [], "winner": None,
                        "winnerConfirmed": False, "tied": False, "ready": False} for a in awards]
-        return finalists, awards
+            mvp = {**mvp, "score": None, "leaders": [], "winner": None,
+                   "winnerConfirmed": False, "tied": False, "ready": False}
+        return finalists, awards, mvp
 
     def board(self, db, public=True):
         cfg = self.config(db)
-        finalists, awards = self.final_results(db, public)
+        finalists, awards, mvp = self.final_results(db, public)
         return {"teams": self.teams(db, public), "config": cfg,
-                "qualification": self.qualification(db, public), "finalists": finalists, "awards": awards,
+                "qualification": self.qualification(db, public), "finalists": finalists, "awards": awards, "mvp": mvp,
                 "updatedAt": cfg["updatedAt"], "serverTime": now_ms()}
 
     def judge_stage(self, actor, stage):
@@ -371,8 +400,9 @@ class EventService:
         old = self.config(db)
         for key, value in body.items():
             if key in {"minJudges", "finalMinJudges"}:
-                if type(value) is not int or not 1 <= value <= 50:
-                    raise APIError(400, "最少评委数应为1至50的整数")
+                limit = FINAL_JUDGE_LIMIT if key == "finalMinJudges" else 50
+                if type(value) is not int or not 1 <= value <= limit:
+                    raise APIError(400, f"最少评委数应为1至{limit}的整数")
             elif key == "finalistCount":
                 if type(value) is not int or value not in {6, 8}:
                     raise APIError(400, "晋级名额只能为6或8")
@@ -491,6 +521,10 @@ class EventService:
                 previous = db.execute(f"SELECT status FROM {table} WHERE judge_id=? AND team_id=?", (actor["id"], team_id)).fetchone()
                 if previous and previous["status"] == "submitted" and status == "draft":
                     raise APIError(409, "已有正式评分，请修改后重新提交；草稿不会覆盖正式评分")
+                if stage == "final" and status == "submitted" and (not previous or previous["status"] != "submitted"):
+                    count = db.execute("SELECT COUNT(*) FROM final_scores WHERE team_id=? AND status='submitted'", (team_id,)).fetchone()[0]
+                    if count >= FINAL_JUDGE_LIMIT:
+                        raise APIError(409, "此队已有6位有效决赛评委，不能再增加正式评分")
                 feedback = text_field(body.get("feedback", ""), "反馈", 2000)
                 values, total = [], None
                 if status != "recused":
@@ -559,8 +593,8 @@ class EventService:
                     award_id, team_id = body.get("awardId"), body.get("teamId")
                     if not isinstance(award_id, str) or not isinstance(team_id, str):
                         raise APIError(400, "奖项与队伍编号不正确")
-                    _, awards = self.final_results(db, public=False)
-                    award = next((a for a in awards if a["id"] == award_id), None)
+                    _, awards, mvp = self.final_results(db, public=False)
+                    award = next((a for a in [*awards, mvp] if a["id"] == award_id), None)
                     if award is None:
                         raise APIError(400, "奖项不存在")
                     if not award["ready"]:
@@ -617,13 +651,16 @@ class EventService:
                 if method == "GET" and path == "/api/admin/export":
                     output = io.StringIO(newline="")
                     writer = csv.writer(output)
-                    writer.writerow(["阶段", "队号", "队名", "项目", "赛道", "评委编号", "评委称呼", "状态", *[r["name"] for r in DIMENSIONS], *[r["name"] for r in AWARDS], "路演总分", "反馈", "更新时间"])
+                    writer.writerow(["阶段", "队号", "队名", "项目", "赛道", "评委编号", "评委称呼", "状态", *[r["name"] for r in DIMENSIONS], *[r["name"] for r in AWARDS], "路演总分", "决赛单评委总分", *["专项累计 · " + r["name"] for r in AWARDS], "团队MVP累计", "反馈", "更新时间"])
+                    final_teams = {t["id"]: t for t in self.final_results(db, public=False)[0]}
                     for stage, table in [("roadshow", "scores"), ("final", "final_scores")]:
                         rows = db.execute(f"SELECT t.*,s.*,s.updated_at AS score_updated_at,a.name AS judge_name FROM teams t JOIN {table} s ON s.team_id=t.id JOIN accounts a ON a.id=s.judge_id ORDER BY t.number,a.id")
                         for row in rows:
                             values = json.loads(row["scores_json"]) if row["scores_json"] else []
                             cells = (values + [""] * (len(DIMENSIONS) - len(values)) + [""] * len(AWARDS)) if stage == "roadshow" else ([""] * len(DIMENSIONS) + values + [""] * (len(AWARDS) - len(values)))
-                            writer.writerow([csv_safe(v) for v in ["路演" if stage == "roadshow" else "决赛", row["number"], row["name"], row["project"], row["track"], row["judge_id"], row["judge_name"], row["status"], *cells, row["total_tenths"] / 10 if stage == "roadshow" and row["total_tenths"] is not None else "", row["feedback"], row["score_updated_at"]]])
+                            aggregate = final_teams.get(row["id"], {})
+                            final_columns = [row["total_tenths"] / 10 if row["total_tenths"] is not None else "", *aggregate.get("finalTotals", [None] * len(AWARDS)), aggregate.get("finalTotal")] if stage == "final" else [""] * (len(AWARDS) + 2)
+                            writer.writerow([csv_safe(v) for v in ["路演" if stage == "roadshow" else "决赛", row["number"], row["name"], row["project"], row["track"], row["judge_id"], row["judge_name"], row["status"], *cells, row["total_tenths"] / 10 if stage == "roadshow" and row["total_tenths"] is not None else "", *final_columns, row["feedback"], row["score_updated_at"]]])
                     self.audit(db, actor, "export")
                     return ("\ufeff" + output.getvalue()).encode("utf-8"), None, None
             raise APIError(404, "接口不存在")

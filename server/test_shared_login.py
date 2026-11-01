@@ -17,9 +17,9 @@ class SharedLoginTests(unittest.TestCase):
     invitation = api_helpers.APITests.invitation
     open = api_helpers.APITests.open
 
-    def configure_shared_codes(self):
+    def configure_shared_codes(self, roles=("admin", "judge")):
         path = self.service.data_dir / "shared-login-codes.json"
-        path.write_text(json.dumps({"admin": SHARED_CODE, "judge": SHARED_CODE}), encoding="utf-8")
+        path.write_text(json.dumps({role: SHARED_CODE for role in roles}), encoding="utf-8")
         self.restart_service()
 
     def restart_service(self):
@@ -131,6 +131,46 @@ class SharedLoginTests(unittest.TestCase):
             self.assertEqual(wrong.post("/api/login", {"role": role, "code": WRONG_CODE})[0], 401)
             self.assertIsNone(wrong.get("/api/session")[1]["role"])
         self.assertEqual(api_helpers.Client(self.server).post("/api/login", {"role": "judge", "code": invitation["code"]})[0], 401)
+
+    def test_all_roles_rotate_existing_audience_and_keep_identities_independent(self):
+        first, existing = self.invitation("audience", "Existing audience")
+        old_admin = self.admin
+        self.configure_shared_codes(("admin", "judge", "audience"))
+        self.assertEqual(old_admin.get("/api/admin")[0], 401)
+        self.assertEqual(first.get("/api/audience")[0], 401)
+        old_code = api_helpers.Client(self.server)
+        self.assertEqual(old_code.post("/api/login", {"role": "audience", "code": existing["code"]})[0], 401)
+        self.login_admin()
+        # Rotation updates existing people rather than bootstrapping another audience identity.
+        self.assertEqual(len(self.admin.get("/api/admin")[1]["audience"]), 1)
+        first = api_helpers.Client(self.server)
+        self.assertEqual(first.post("/api/login", {"role": "audience", "code": SHARED_CODE})[0], 200)
+        self.assertEqual(first.get("/api/session")[1]["role"], "audience")
+        status, second_invite, _ = self.admin.post("/api/admin/invitations", {"role": "audience", "name": "Second audience"})
+        self.assertEqual(status, 200)
+        self.assertEqual(second_invite["code"], SHARED_CODE)
+        second = api_helpers.Client(self.server)
+        status, selection, headers = second.post("/api/login", {"role": "audience", "code": SHARED_CODE})
+        self.assertEqual(status, 200)
+        self.assertTrue(selection["selectAccount"])
+        self.assertEqual({a["id"] for a in selection["accounts"]}, {existing["id"], second_invite["id"]})
+        self.assertNotIn("Set-Cookie", headers)
+        self.assertEqual(second.get("/api/audience")[0], 401)
+        self.assertEqual(second.post("/api/login", {"role": "audience", "code": SHARED_CODE, "accountId": second_invite["id"]})[0], 200)
+        teams = [self.team(i + 1) for i in range(2)]
+        self.open()
+        self.assertEqual(first.post("/api/vote", {"teamId": teams[0]})[0], 200)
+        self.assertEqual(second.post("/api/vote", {"teamId": teams[1]})[0], 200)
+        self.assertEqual(first.get("/api/audience")[1]["votedTeamIds"], teams[:1])
+        self.assertEqual(second.get("/api/audience")[1]["votedTeamIds"], teams[1:])
+
+    def test_shared_audience_configuration_does_not_bootstrap_audience(self):
+        self.configure_shared_codes(("admin", "judge", "audience"))
+        self.login_admin()
+        self.assertEqual(self.admin.get("/api/admin")[1]["audience"], [])
+        status, invitation, _ = self.admin.post("/api/admin/invitations", {"role": "audience", "name": "New audience"})
+        self.assertEqual(status, 200)
+        self.assertEqual(invitation["code"], SHARED_CODE)
 
 
 if __name__ == "__main__":

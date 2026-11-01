@@ -37,7 +37,7 @@ class SubmissionTests(unittest.TestCase):
         self.temp.cleanup()
 
     def login(self, number=1):
-        status, value, _ = self.public.post("/api/submissions/login", {"teamId": self.ids[number], "code": "000000"})
+        status, value, _ = self.public.post("/api/submissions/login", {"teamId": self.ids[number]})
         self.assertEqual(status, 200, value)
         return value["token"]
 
@@ -55,11 +55,12 @@ class SubmissionTests(unittest.TestCase):
         self.assertEqual([t["number"] for t in data["teams"]], [1, 2, 12])
         self.assertNotIn("submission", data["teams"][0])
         token = self.login()
-        self.assertEqual(self.public.post("/api/submissions/login", {"teamId": self.ids[1], "code": "000000"})[0], 409)
-        status, value, _ = self.public.post("/api/submissions/login", {"teamId": self.ids[1], "code": "000000", "receipt": token})
+        self.assertEqual(self.public.post("/api/submissions/login", {"teamId": self.ids[1]})[0], 409)
+        status, value, _ = self.public.post("/api/submissions/login", {"teamId": self.ids[1], "receipt": token})
         self.assertEqual(status, 200)
         self.assertEqual(value["token"], token)
-        self.assertEqual(self.public.post("/api/submissions/login", {"teamId": self.ids[2], "code": "wrong"})[0], 401)
+        self.assertEqual(self.public.post("/api/submissions/login", {"teamId": "unknown-team"})[0], 404)
+        self.assertEqual(self.public.post("/api/submissions/login", {})[0], 400)
 
     def test_metadata_drafts_link_validation_and_persistence(self):
         token = self.login()

@@ -149,9 +149,6 @@ class SubmissionService:
                 value = {"teams": [{k: row[k] for k in ("id", "number", "name", "project", "submitted")} for row in self.rows(db)], "maxFileSize": FILE_LIMIT, "maxFiles": FILE_COUNT}
             elif method == "POST" and path == "/api/submissions/login":
                 self.service.rate_limit(handler.client_address[0], "student", per_ip_limit=100)
-                code = self.field(body.get("code"), "提交码", 160, True)
-                if not hmac.compare_digest(code.encode(), b"000000"):
-                    raise self.error(401, "提交码不正确")
                 team_id = self.field(body.get("teamId"), "队伍", 80, True)
                 if not db.execute("SELECT 1 FROM teams WHERE id=?", (team_id,)).fetchone():
                     raise self.error(404, "队伍不存在")

@@ -38,3 +38,13 @@ test('HTML complies with site CSP and file pickers accept requested formats',()=
   assert.match(source,/accept="\.ppt,\.pptx,\.pdf"/);assert.match(source,/accept="\.html,\.htm,\.zip"/);
   assert.match(source,/X-File-Name/);assert.match(source,/encodeURIComponent\(file.name\)/);
 });
+test('students choose a team without a submission code; teacher login keeps its code',()=>{
+  const a=app();a.run("teams=[{id:'t1',number:1,name:'第一队',submitted:false}];renderStudent();");
+  const html=a.get('main').innerHTML;
+  assert.match(html,/name="teamId"/);assert.match(html,/name="receipt"/);
+  assert.ok(!html.includes('name="code"'));assert.ok(!html.includes('活动提交码'));
+  const studentFlow=source.slice(source.indexOf('function renderStudent()'),source.indexOf('function showTeamDetail()'));
+  assert.match(studentFlow,/data:\{teamId:id,\.\.\.\(receipt\?\{receipt\}/);
+  assert.ok(!studentFlow.includes('elements.code'));
+  a.run('renderAdminLogin()');assert.match(a.get('main').innerHTML,/组织方邀请码/);assert.match(a.get('main').innerHTML,/name="code"/);
+});

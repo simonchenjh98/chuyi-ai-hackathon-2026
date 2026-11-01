@@ -37,7 +37,7 @@ async function render() {
   try { if(admin){await loadAdmin(version);}else{const data=await request('submissions/teams');if(version!==routeId)return;teams=[...(data.teams||[])].sort((a,b)=>a.number-b.number);renderStudent();} }catch(e){if(version===routeId)errorState(e);}
 }
 function renderStudent() {
-  root.innerHTML=heading()+`<div class="layout"><aside class="card side"><h2 class="step"><span class="step-num">01</span>选择你的队伍</h2><form id="team-login"><label class="field">报名队号 · 队伍名称<select name="teamId" id="team-select" required><option value="">请选择自己的队伍</option>${teams.map(t=>`<option value="${esc(t.id)}" ${t.id===studentTeamId?'selected':''}>${esc(label(t))}${t.submitted?' · 已交':''}</option>`).join('')}</select></label><label class="field">活动提交码<input name="code" type="password" inputmode="numeric" autocomplete="off" maxlength="160" required placeholder="请输入老师提供的提交码"></label><details><summary class="small">更换设备？使用本组修改凭证</summary><label class="field section-gap">本组修改凭证<input name="receipt" autocomplete="off" maxlength="160" placeholder="从原设备备份中粘贴"><small>首次提交无需填写。本组已认领时，请在原浏览器继续，或联系老师重置。</small></label></details><p class="error" role="alert" id="login-error"></p><button class="btn full" type="submit">进入本组提交 ↗</button></form><div class="team-detail" id="team-detail"></div><ul class="checklist"><li>按报名队号选择，别选错组</li><li>PPT、演示／游戏网页，至少交一项</li><li>最多 6 个附件，单个不超过 100 MB</li></ul></aside><div id="editor"><section class="card empty"><span class="kicker">YOUR NEXT BIG IDEA</span><h2 class="section-gap">作品准备好了，就从这里提交。</h2><p>先在左侧选择自己的队伍并进入。<br>可交 PPT、PDF、HTML、网页 ZIP，或在线演示链接。</p></section><div class="note warm"><strong>想让老师完整下载网页？</strong><br>请上传单个 HTML 文件，或把网页和图片、脚本等素材一起打成 ZIP。只填在线链接时，下载包将保存链接与说明，不能保证离线运行。</div></div></div>`;
+  root.innerHTML=heading()+`<div class="layout"><aside class="card side"><h2 class="step"><span class="step-num">01</span>选择你的队伍</h2><form id="team-login"><label class="field">报名队号 · 队伍名称<select name="teamId" id="team-select" required><option value="">请选择自己的队伍</option>${teams.map(t=>`<option value="${esc(t.id)}" ${t.id===studentTeamId?'selected':''}>${esc(label(t))}${t.submitted?' · 已交':''}</option>`).join('')}</select></label><details><summary class="small">更换设备？使用本组修改凭证</summary><label class="field section-gap">本组修改凭证<input name="receipt" autocomplete="off" maxlength="160" placeholder="从原设备备份中粘贴"><small>首次提交无需填写。本组已认领时，请在原浏览器继续，或联系老师重置。</small></label></details><p class="error" role="alert" id="login-error"></p><button class="btn full" type="submit">进入本组提交 ↗</button></form><div class="team-detail" id="team-detail"></div><ul class="checklist"><li>按报名队号选择，别选错组</li><li>PPT、演示／游戏网页，至少交一项</li><li>最多 6 个附件，单个不超过 100 MB</li></ul></aside><div id="editor"><section class="card empty"><span class="kicker">YOUR NEXT BIG IDEA</span><h2 class="section-gap">作品准备好了，就从这里提交。</h2><p>先在左侧选择自己的队伍并进入。<br>可交 PPT、PDF、HTML、网页 ZIP，或在线演示链接。</p></section><div class="note warm"><strong>想让老师完整下载网页？</strong><br>请上传单个 HTML 文件，或把网页和图片、脚本等素材一起打成 ZIP。只填在线链接时，下载包将保存链接与说明，不能保证离线运行。</div></div></div>`;
   const select=document.getElementById('team-select');select.onchange=showTeamDetail;showTeamDetail();
   document.getElementById('team-login').onsubmit=async e=>{
     e.preventDefault();if(pending)return;const form=e.currentTarget, id=form.elements.teamId.value;
@@ -45,10 +45,10 @@ function renderStudent() {
     document.getElementById('login-error').textContent='';setPending(true);
     try {
       const receipt=form.elements.receipt.value.trim()||savedToken(id);
-      const result=await request('submissions/login',{data:{teamId:id,code:form.elements.code.value.trim(),...(receipt?{receipt}: {})}});
+      const result=await request('submissions/login',{data:{teamId:id,...(receipt?{receipt}: {})}});
       token=result.token||result.receipt;if(!token)throw new Error('登录凭证缺失，请重试。');studentTeamId=id;
       const persisted=keepToken(id,token);mine=result.team?result:await request('submissions/mine',{student:true});
-      form.elements.code.value='';form.elements.receipt.value='';dirty=false;renderEditor();showTeamDetail();
+      form.elements.receipt.value='';dirty=false;renderEditor();showTeamDetail();
       if(!persisted)toast('浏览器未允许保存凭证，请点击“备份本组凭证”，避免退出后无法修改。');
     }catch(error){document.getElementById('login-error').textContent=error.message;}finally{setPending(false);}
   };
@@ -67,7 +67,7 @@ function renderEditor() {
   form.onsubmit=saveSubmission;
   document.getElementById('ppt-upload').onchange=e=>uploadFiles([...e.target.files],'ppt',e.target);
   document.getElementById('web-upload').onchange=e=>uploadFiles([...e.target.files],'web',e.target);
-  document.getElementById('backup-receipt').onclick=()=>downloadBlob(new Blob([`初一AI黑客松 · 第${number(t)}队 ${t.name}\n作品修改凭证，请本组保管，不要公开：\n${token}\n\n更换设备时打开作品提交页，选择本组，输入提交码，并在“更换设备”中粘贴上方凭证。\n`],{type:'text/plain;charset=utf-8'}),`第${number(t)}队_作品修改凭证_请保密.txt`);
+  document.getElementById('backup-receipt').onclick=()=>downloadBlob(new Blob([`初一AI黑客松 · 第${number(t)}队 ${t.name}\n作品修改凭证，请本组保管，不要公开：\n${token}\n\n更换设备时打开作品提交页，选择本组，并在“更换设备”中粘贴上方凭证。\n`],{type:'text/plain;charset=utf-8'}),`第${number(t)}队_作品修改凭证_请保密.txt`);
 }
 function renderFiles() {
   const el=document.getElementById('files-list');if(!el)return;const files=mine.files||[];
@@ -166,7 +166,7 @@ async function batchDownload() {
   catch(e){error.textContent=e.message;}finally{pending=false;if(button.isConnected){button.textContent=old;updateSelection();}}
 }
 async function resetTeam(id,button) {
-  const t=adminTeams.find(t=>t.id===id);if(!confirm(`为第${number(t)}队“${t.name}”重置修改凭证？现有作品会保留，旧设备凭证将失效，本组可用提交码在新设备重新进入。`))return;
+  const t=adminTeams.find(t=>t.id===id);if(!confirm(`为第${number(t)}队“${t.name}”重置修改凭证？现有作品会保留，旧设备凭证将失效，本组可在新设备直接选择队伍重新进入。`))return;
   button.disabled=true;try{await request('submissions/admin/reset',{data:{teamId:id}});toast('本组已重置，可在新设备选择队伍重新进入。');}catch(e){toast(e.message);}finally{if(button.isConnected)button.disabled=false;}
 }
 async function refreshAdmin() {

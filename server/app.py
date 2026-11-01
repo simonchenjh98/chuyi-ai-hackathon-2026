@@ -27,7 +27,7 @@ DIMENSIONS = [
     {"id": "ai", "name": "方案与AI使用", "max": 20},
     {"id": "prototype", "name": "原型完成度", "max": 20},
     {"id": "testing", "name": "测试与改进", "max": 15},
-    {"id": "opensource", "name": "开源与责任", "max": 15},
+    {"id": "opensource", "name": "社会关怀与责任", "max": 15},
     {"id": "teamwork", "name": "团队协作与表达", "max": 10},
 ]
 AWARDS = [

@@ -1,6 +1,6 @@
 """Release isolation checks; these tests never connect to a server."""
 import unittest
-from install import BEGIN, END, LOCATIONS, OLD_SERVICES, ROOT, SERVICE, allowed, nginx_candidate
+from install import BEGIN, END, FILES, LOCATIONS, OLD_SERVICES, REQUIRED_SERVER_FILES, ROOT, SERVICE, allowed, nginx_candidate
 
 BASE = '''server {
     listen 80;
@@ -49,9 +49,27 @@ class ReleaseIsolationTest(unittest.TestCase):
         for name in [".runtime/admin-access.txt", "server/data/event.sqlite3", "server/test_api.py", "server/secret.py", "assets/credential.png", "../index.html", "deploy/install.py"]:
             with self.subTest(name=name):
                 self.assertFalse(allowed(name))
-        for name in ["index.html", "platform.js", "server/app.py", "assets/hero.webp", "downloads/chuyi-hackathon.ics"]:
+        for name in ["index.html", "platform.js", "submit.html", "submit.css", "submit.js", "server/app.py", "server/submissions.py", "assets/hero.webp", "downloads/chuyi-hackathon.ics"]:
             with self.subTest(name=name):
                 self.assertTrue(allowed(name))
+
+    def test_submission_release_requires_the_page_and_server(self):
+        self.assertTrue({'submit.html', 'submit.css', 'submit.js'}.issubset(FILES))
+        self.assertTrue({'server/app.py', 'server/submissions.py'}.issubset(REQUIRED_SERVER_FILES))
+
+    def test_large_bodies_are_limited_to_submission_uploads(self):
+        upload = LOCATIONS.split('location ^~ /chuyi/api/submissions/upload/ {', 1)[1].split('}', 1)[0]
+        download = LOCATIONS.split('location = /chuyi/api/submissions/download {', 1)[1].split('}', 1)[0]
+        regular = LOCATIONS.split('location ^~ /chuyi/ {', 1)[1].split('}', 1)[0]
+        self.assertIn('client_max_body_size 101m;', upload)
+        self.assertIn('proxy_request_buffering off;', upload)
+        self.assertIn('proxy_read_timeout 180s;', upload)
+        self.assertIn('client_body_timeout 180s;', upload)
+        self.assertIn('client_max_body_size 32k;', download)
+        self.assertIn('proxy_buffering off;', download)
+        self.assertIn('proxy_read_timeout 180s;', download)
+        self.assertIn('client_max_body_size 32k;', regular)
+        self.assertEqual(LOCATIONS.count('client_max_body_size 101m;'), 1)
 
     def test_service_and_existing_gotc_stay_separate(self):
         self.assertEqual(str(ROOT).replace("\\", "/"), "/opt/chuyi-hackathon")

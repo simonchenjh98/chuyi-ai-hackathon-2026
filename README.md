@@ -6,6 +6,8 @@
 
 - GitHub Pages 官网镜像：https://simonchenjh98.github.io/chuyi-ai-hackathon-2026/
 - 官网：https://8.141.114.201/chuyi/
+- 学生作品提交：https://8.141.114.201/chuyi/submit.html
+- 组织方作品下载：https://8.141.114.201/chuyi/submit.html#admin
 - 路演评委：https://8.141.114.201/chuyi/platform.html#judge-roadshow
 - 决赛评委：https://8.141.114.201/chuyi/platform.html#judge-final
 - 路演成绩：https://8.141.114.201/chuyi/platform.html#board-roadshow
@@ -24,6 +26,17 @@ python -B server/app.py
 ```
 
 访问 http://127.0.0.1:5275/chuyi/ 。首次运行的管理码在指定数据目录 admin-access.txt。请勿提交、公开运行数据或邀请码。云端部署见 deploy/README.md。GitHub Pages 镜像只展示活动官网，其评委与成绩入口会跳转到正式服务；本项目应完整部署 Python 服务才能使用评分。
+
+## 学生作品提交与批量下载
+
+`submit.html` 使用独立作品提交凭证，学生按报名队号选择本组，输入活动提交码后认领。
+作品可上传 PPT/PPTX/PDF、HTML/HTM/ZIP，或填写在线演示链接；每组最多6个附件，每个100MB。
+凭证保存在当前浏览器，可下载备份并在新设备恢复；组织方可重置凭证，保留已交作品。
+作品记录在 SQLite，附件和临时 ZIP 位于私有 `CHUYI_DATA_DIR/project-files`，不进入源码或公开静态目录。
+
+老师在 `submit.html#admin` 使用原组织方身份登录，按队号查看进度，搜索与筛选、勾选多组或全选，
+一键下载全部／仅PPT／仅网页。ZIP按队号建立各组目录，并附作品说明和CSV清单。
+只提供在线网址时保存链接与说明；完整网页原文件需学生上传HTML或ZIP，依赖外部API的网页仍需联网。
 
 ## 评审流程
 
@@ -51,7 +64,8 @@ python -B server/app.py
 ```powershell
 node --check app.js
 node --check platform.js
-node --test tests/platform.test.mjs
+node --check submit.js
+node --test tests/platform.test.mjs tests/submit.test.mjs
 python -B scripts/check_site.py
 python -B -m unittest discover -s server -p 'test_*.py'
 python -B -m unittest discover -s deploy -p 'test_install.py'

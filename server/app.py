@@ -43,7 +43,7 @@ BODY_LIMIT = 16384
 SESSION_SECONDS = 12 * 3600
 VOTE_LIMIT = 3
 COOKIE_NAME = "chuyi_session"
-STATIC_FILES = {"index.html", "styles.css", "app.js", "platform.html", "platform.js", "platform.css", "favicon.svg"}
+STATIC_FILES = {"index.html", "styles.css", "app.js", "platform.html", "platform.js", "platform.css", "submit.html", "submit.js", "submit.css", "favicon.svg"}
 ASSET_EXTENSIONS = {".webp", ".png", ".jpg", ".jpeg", ".svg", ".ico", ".woff", ".woff2"}
 DOWNLOAD_EXTENSIONS = {".ics", ".txt"}
 SCHEMA = """
@@ -188,6 +188,8 @@ class EventService:
             os.replace(temporary, access_file)
             os.chmod(access_file, 0o600)
         os.chmod(self.db_path, 0o600)
+        from submissions import SubmissionService
+        self.submissions = SubmissionService(self, APIError)
 
     @contextmanager
     def db(self):
@@ -837,6 +839,9 @@ class EventHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         self.handle_route()
 
+    def do_DELETE(self):
+        self.handle_route()
+
     def do_OPTIONS(self):
         self.respond(405, {"error": "不支持跨域请求"})
 
@@ -855,6 +860,9 @@ class EventHandler(BaseHTTPRequestHandler):
             if service.base_path and not path.startswith(service.base_path + "/"):
                 raise APIError(404, "页面不存在")
             path = path[len(service.base_path):] if service.base_path else path
+            if path.startswith("/api/submissions/"):
+                service.submissions.handle(self, path)
+                return
             if path.startswith("/api/"):
                 if self.command == "HEAD":
                     raise APIError(405, "接口不支持此方法")

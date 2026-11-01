@@ -27,7 +27,8 @@ jobs:
         run: |
           node --check app.js
           node --check platform.js
-          node --test tests/platform.test.mjs
+          node --check submit.js
+          node --test tests/platform.test.mjs tests/submit.test.mjs
           python -B scripts/check_site.py
           python -B -m unittest discover -s server -p 'test_*.py'
           python -B -m unittest discover -s deploy -p 'test_install.py'

@@ -26,7 +26,7 @@ IDENTITY = Path.home() / '.ssh' / 'realtalk_ecs'
 
 def public_files():
     # Import only the allowlist validator, never the remote install main().
-    from install import FILES, allowed
+    from install import FILES, REQUIRED_SERVER_FILES, allowed
     files = []
     for name in sorted(FILES):
         path = PROJECT / name
@@ -44,8 +44,9 @@ def public_files():
                     raise RuntimeError(f'Release entry is a symlink: {relative}')
                 if file.is_file() and allowed(relative):
                     files.append(file)
-    if not any(p.relative_to(PROJECT).as_posix() == 'server/app.py' for p in files):
-        raise RuntimeError('server/app.py is missing')
+    packaged = {p.relative_to(PROJECT).as_posix() for p in files}
+    if not REQUIRED_SERVER_FILES.issubset(packaged):
+        raise RuntimeError('A required application server module is missing')
     return files
 
 

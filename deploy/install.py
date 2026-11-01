@@ -22,6 +22,31 @@ OLD_SERVICES = ['etown-hackathon', 'gotc-hackathon', 'nginx', 'realtalk-api', 'd
 BEGIN = '    # BEGIN CHUYI HACKATHON MANAGED LOCATION\n'
 END = '    # END CHUYI HACKATHON MANAGED LOCATION\n'
 LOCATIONS = BEGIN + '''    location = /chuyi { return 308 /chuyi/; }
+    location ^~ /chuyi/api/submissions/upload/ {
+        proxy_pass http://127.0.0.1:5275;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_request_buffering off;
+        proxy_read_timeout 180s;
+        proxy_send_timeout 180s;
+        client_body_timeout 180s;
+        client_max_body_size 101m;
+    }
+    location = /chuyi/api/submissions/download {
+        proxy_pass http://127.0.0.1:5275;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_buffering off;
+        proxy_read_timeout 180s;
+        proxy_send_timeout 180s;
+        client_max_body_size 32k;
+    }
     location ^~ /chuyi/ {
         proxy_pass http://127.0.0.1:5275;
         proxy_http_version 1.1;
@@ -65,7 +90,9 @@ MemoryMax=512M
 [Install]
 WantedBy=multi-user.target
 '''
-FILES = {'index.html', 'styles.css', 'app.js', 'platform.html', 'platform.css', 'platform.js', 'favicon.svg'}
+FILES = {'index.html', 'styles.css', 'app.js', 'platform.html', 'platform.css', 'platform.js',
+         'submit.html', 'submit.css', 'submit.js', 'favicon.svg'}
+REQUIRED_SERVER_FILES = {'server/app.py', 'server/submissions.py'}
 ASSETS = {'.webp', '.png', '.jpg', '.jpeg', '.svg', '.ico', '.woff', '.woff2'}
 
 
@@ -215,7 +242,7 @@ def main():
         members = package.getmembers()
         if len({m.name for m in members}) != len(members) or any(not m.isfile() or not allowed(m.name) for m in members):
             raise RuntimeError('Archive contains a duplicate or non-allowlisted entry')
-        if not (FILES | {'server/app.py'}).issubset({m.name for m in members}):
+        if not (FILES | REQUIRED_SERVER_FILES).issubset({m.name for m in members}):
             raise RuntimeError('Release is missing required application files')
         package.extractall(release, members=members, filter='data')
     for file in release.rglob('*'):

@@ -14,6 +14,8 @@ GET /api/judge/roadshow、/api/judge/final 返回本阶段队伍、myScores、di
 
 `roadshowOpensAt` 为毫秒时间戳或 null，`roadshowAutoOpenDone` 由后端维护。到期请求会以事务原子开放路演并记为已执行；之后人工关闭不会再次自动开放。本届13:00北京时间对应 `1793509200000`，存入正式库设置，不硬编码为所有新库的默认时间。
 
+`roadshowClosesAt` 为毫秒时间戳或 null，`roadshowAutoCloseDone` 由后端维护。本届2026年11月1日16:10北京时间对应 `1793520600000`。到期后服务端拒绝路演提交、改分、草稿和回避，前端每秒同步关闭状态；截止优先于旧开放计划。延长或清空截止后，组织方才可重新开放路演。该设置不控制决赛或作品文件上传。
+
 管理员 GET /api/admin；POST /api/admin/settings、teams、invitations、revoke、qualify、unqualify、awards；GET /api/admin/export 导出两阶段CSV。invitations 使用 role=judge 和 judgeStage。qualify 在边界同分时需要严格N个teamIds；awards 使用 awardId 和 teamId，限当前最高分候选。所有操作校验阶段和状态并写审计日志。
 
 正式活动可在私有数据目录放置 `shared-login-codes.json`，分别为 `admin`、`judge`、`audience` 配置六位或更长的统一邀请码。路演登录发送 `judgeStage=roadshow` 和持久随机 `deviceToken`，服务器验证邀请码后自动复用该浏览器的独立评委身份；决赛仍选择01—06号身份。设备标识本身不能绕过邀请码验证，停用身份不能凭原设备标识重新创建。配置文件不得提交到 Git。

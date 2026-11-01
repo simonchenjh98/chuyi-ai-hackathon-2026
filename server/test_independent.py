@@ -11,6 +11,7 @@ import test_stages as stage_helpers
 
 TEST_SHARED_CODE = "445566"
 OPEN_AT = 1793509200000  # 2026-11-01 13:00 Asia/Shanghai.
+CLOSE_AT = 1793520600000  # 2026-11-01 16:10 Asia/Shanghai.
 
 
 class IndependentTests(unittest.TestCase):
@@ -141,6 +142,95 @@ class IndependentTests(unittest.TestCase):
             self.assertTrue(self.public.get("/api/board")[1]["config"]["scoringOpen"])
             self.settings(scoringOpen=False, roadshowOpensAt=None)
             self.assertTrue(self.settings(roadshowOpensAt=OPEN_AT)["config"]["scoringOpen"])
+
+    def test_roadshow_close_boundary_preserves_scores_but_final_and_upload_continue(self):
+        team = self.team()
+        second_team = self.team(2)
+        road, _ = self.invitation("roadshow")
+        final, _ = self.invitation("final")
+        with patch("app.now_ms", return_value=CLOSE_AT - 1):
+            self.settings(scoringOpen=True, finalScoringOpen=True, roadshowClosesAt=CLOSE_AT)
+            self.assertEqual(self.score(road, team, [16, 16, 16, 12, 12, 8])[0], 200)
+            self.assertEqual(self.score(road, second_team, [0] * 6, status="draft")[0], 200)
+            status = road.get("/api/judge/status")[1]
+            self.assertTrue(status["scoringOpen"])
+            self.assertEqual(status["roadshowClosesAt"], CLOSE_AT)
+            self.assertFalse(status["roadshowAutoCloseDone"])
+            with self.service.db() as db:
+                original = [tuple(row) for row in db.execute("SELECT * FROM scores ORDER BY team_id")]
+        # The first request at the boundary is a denied revision. Its timer
+        # transition must be committed even though the score transaction fails.
+        with patch("app.now_ms", return_value=CLOSE_AT):
+            self.assertEqual(self.score(road, team, [20, 20, 20, 15, 15, 10])[0], 409)
+            with self.service.db() as db:
+                self.assertEqual(json.loads(db.execute("SELECT value FROM settings WHERE key='scoringOpen'").fetchone()[0]), False)
+                self.assertTrue(json.loads(db.execute("SELECT value FROM settings WHERE key='roadshowAutoCloseDone'").fetchone()[0]))
+                self.assertEqual(db.execute("SELECT COUNT(*) FROM audit WHERE action='roadshow.auto-close'").fetchone()[0], 1)
+            for target in [team, second_team]:
+                for state in ["submitted", "draft", "recused"]:
+                    self.assertEqual(self.score(road, target, [0] * 6, status=state)[0], 409)
+            self.assertEqual(self.score(final, team, [25] * 4, "final")[0], 200)
+            workbench = road.get("/api/judge/roadshow")[1]
+            self.assertFalse(workbench["scoringOpen"])
+            self.assertTrue(workbench["roadshowAutoCloseDone"])
+            self.assertEqual(workbench["config"]["roadshowClosesAt"], CLOSE_AT)
+            status, upload_session, _ = self.public.post("/api/submissions/login", {"teamId": team})
+            self.assertEqual(status, 200)
+            uploaded = self.public.request("POST", "/api/submissions/upload/web", raw=b"<!doctype html><h1>still open</h1>",
+                                           headers={"Authorization": "Bearer " + upload_session["token"], "Content-Type": "application/octet-stream", "X-File-Name": "demo.html"})
+            self.assertEqual(uploaded[0], 200)
+        with patch("app.now_ms", return_value=CLOSE_AT + 1000):
+            self.assertEqual(self.score(road, team, [0] * 6)[0], 409)
+            with self.service.db() as db:
+                self.assertEqual([tuple(row) for row in db.execute("SELECT * FROM scores ORDER BY team_id")], original)
+            self.assertEqual(self.public.get("/api/board")[1]["teams"][0]["score"], 80)
+
+    def test_close_wins_over_old_open_plan_and_admin_must_extend_or_clear(self):
+        with patch("app.now_ms", return_value=CLOSE_AT + 1):
+            state = self.settings(scoringOpen=False, roadshowOpensAt=OPEN_AT, roadshowClosesAt=CLOSE_AT)["config"]
+            self.assertFalse(state["scoringOpen"])
+            self.assertTrue(state["roadshowAutoCloseDone"])
+            self.assertEqual(self.admin.post("/api/admin/settings", {"scoringOpen": True})[0], 409)
+            state = self.settings(roadshowOpensAt=OPEN_AT + 1)["config"]
+            self.assertFalse(state["scoringOpen"])
+            with self.service.db() as db:
+                self.assertEqual(db.execute("SELECT COUNT(*) FROM audit WHERE action='roadshow.auto-open'").fetchone()[0], 0)
+                self.assertEqual(db.execute("SELECT COUNT(*) FROM audit WHERE action='roadshow.auto-close'").fetchone()[0], 1)
+            extended = self.settings(roadshowClosesAt=CLOSE_AT + 60_000, scoringOpen=True)["config"]
+            self.assertTrue(extended["scoringOpen"])
+            self.assertFalse(extended["roadshowAutoCloseDone"])
+        with patch("app.now_ms", return_value=CLOSE_AT + 60_000):
+            self.assertFalse(self.public.get("/api/board")[1]["config"]["scoringOpen"])
+            cleared = self.settings(roadshowClosesAt=None, scoringOpen=True)["config"]
+            self.assertTrue(cleared["scoringOpen"])
+            self.assertFalse(cleared["roadshowAutoCloseDone"])
+            self.assertIsNone(cleared["roadshowClosesAt"])
+        for invalid in [True, "1793520600000", -1, 1.5, [], 9007199254740992]:
+            self.assertEqual(self.admin.post("/api/admin/settings", {"roadshowClosesAt": invalid})[0], 400)
+
+    def test_close_survives_restart_manual_early_close_and_concurrent_audit_once(self):
+        road, _ = self.invitation("roadshow")
+        with patch("app.now_ms", return_value=CLOSE_AT - 1000):
+            self.settings(scoringOpen=True, roadshowOpensAt=OPEN_AT, roadshowClosesAt=CLOSE_AT)
+            self.settings(scoringOpen=False)
+            self.restart()
+            state = road.get("/api/judge/status")[1]
+            self.assertFalse(state["scoringOpen"])
+            self.assertFalse(state["roadshowAutoCloseDone"])
+        with patch("app.now_ms", return_value=CLOSE_AT):
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                replies = list(pool.map(lambda _: api_helpers.Client(self.server).get("/api/board"), range(8)))
+            self.assertTrue(all(reply[0] == 200 and not reply[1]["config"]["scoringOpen"] and reply[1]["config"]["roadshowAutoCloseDone"] for reply in replies))
+            with self.service.db() as db:
+                self.assertEqual(db.execute("SELECT COUNT(*) FROM audit WHERE action='roadshow.auto-close'").fetchone()[0], 1)
+        self.restart()
+        with patch("app.now_ms", return_value=CLOSE_AT + 1000):
+            state = self.settings(roadshowClosesAt=CLOSE_AT)["config"]
+            self.assertTrue(state["roadshowAutoCloseDone"])
+            self.assertFalse(state["scoringOpen"])
+            self.assertEqual(self.admin.post("/api/admin/settings", {"scoringOpen": True})[0], 409)
+            with self.service.db() as db:
+                self.assertEqual(db.execute("SELECT COUNT(*) FROM audit WHERE action='roadshow.auto-close'").fetchone()[0], 1)
 
     def test_all_teams_selectable_without_qualification_and_only_participants_gate_awards(self):
         ids = [self.team(i + 1) for i in range(23)]

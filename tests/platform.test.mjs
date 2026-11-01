@@ -35,6 +35,17 @@ test('roadshow board explains unlimited judges and shows one submitted score as 
   assert.match(html,/80\.00/);
 });
 
+test('roadshow board shows the Shanghai deadline and the server-confirmed closed state', () => {
+  const config={...cfg,roadshowClosesAt:1793520600000,roadshowAutoCloseDone:false};
+  const open=renderer()({teams:[team(1)],config});
+  assert.match(open,/截止时间：北京时间[^<]*16:10:00/);
+  assert.match(open,/路演评分开放中/);
+  const closed=renderer()({teams:[team(1)],config:{...config,scoringOpen:false,roadshowAutoCloseDone:true}});
+  assert.match(closed,/路演评分已截止/);
+  assert.match(closed,/16:10:00/);
+  assert.ok(!closed.includes('路演评分开放中'));
+});
+
 test('public team text cannot inject HTML or disclose unprovided judge data', () => {
   const html = renderer()({teams:[team(1,{name:'<img src=x onerror=alert(1)>',project:'<script>secret</script>'})],config:cfg});
   assert.ok(!html.includes('<img src=x'));
@@ -194,6 +205,7 @@ function browserHarness({hash='#admin', confirm=()=>false, fetch}={}) {
     fetch:async(url,options)=>{
       requests.push({path:url.pathname, options});
       const result = fetch ? await fetch(url,options) : data;
+      if(result&&typeof result.ok==='boolean'&&typeof result.json==='function')return result;
       return {ok:true, json:async()=>result};
     },
   });
@@ -325,6 +337,52 @@ test('scheduled opening updates controls in place every second without replacing
   assert.equal(h.requests.filter(r=>r.path.endsWith('/api/judge/roadshow')).length,1);
 });
 
+test('scheduled roadshow cutoff disables editing and submission without clearing pending inputs', async () => {
+  const data={teams:[team(1)],myScores:[],dimensions:[{id:'problem',name:'问题价值',max:20}],scoringOpen:true,roadshowClosesAt:1793520600000,roadshowAutoCloseDone:false};
+  const h=browserHarness({hash:'#judge-roadshow',fetch:async(url)=>url.pathname.endsWith('/api/judge/status')?{stage:'roadshow',scoringOpen:false,roadshowClosesAt:1793520600000,roadshowAutoCloseDone:true}:data});
+  h.run("session={role:'judge',judgeStage:'roadshow'};");await h.run('renderRoute()');
+  assert.match(h.element('platform-main').innerHTML,/截止时间：北京时间[^<]*16:10:00/);
+  const form=h.element('score-form');form.elements.score0.value='18.5';form.elements.feedback.value='尚未提交的评语';form.oninput();
+  const input={tagName:'INPUT',disabled:false},feedback={tagName:'TEXTAREA',disabled:false},submit={tagName:'BUTTON',disabled:false};form.formControls=[input,feedback,submit];
+  const original=h.element('judge-editor').innerHTML;
+  await h.fireTimer(1000);
+  assert.equal(h.run('judgeData.scoringOpen'),false);
+  assert.equal(h.run('judgeData.roadshowAutoCloseDone'),true);
+  assert.ok(input.disabled&&feedback.disabled&&submit.disabled);
+  assert.equal(h.element('save-draft').disabled,true);
+  assert.equal(form.elements.score0.value,'18.5');
+  assert.equal(form.elements.feedback.value,'尚未提交的评语');
+  assert.equal(h.run('editorDirty'),true);
+  assert.equal(h.element('judge-editor').innerHTML,original);
+  assert.match(h.element('judge-availability').textContent,/路演评分已截止/);
+  assert.match(h.element('judge-availability').textContent,/16:10:00/);
+  assert.equal(h.requests.filter(r=>r.path.endsWith('/api/judge/roadshow')).length,1);
+});
+
+test('a score rejected after cutoff stays disabled when the pending request finishes', async () => {
+  let finish,start;const started=new Promise(resolve=>{start=resolve;});
+  const h=browserHarness({hash:'#judge-roadshow',fetch:async(url)=>{
+    if(url.pathname.endsWith('/api/score')){start();return new Promise(resolve=>{finish=()=>resolve({ok:false,status:409,json:async()=>({error:'路演评分已截止，不能继续提交。'})});});}
+    return {stage:'roadshow',scoringOpen:false,roadshowClosesAt:1793520600000,roadshowAutoCloseDone:true};
+  }});
+  const form=h.element('score-form');form.elements.score0.value='18.5';form.elements.feedback.value='保留的评语';
+  h.run(`route='judge-roadshow';judgeStage='roadshow';routeVersion=1;selectedTeam='T1';judgeData={teams:[${JSON.stringify(team(1))}],myScores:[],dimensions:[{id:'problem',name:'问题价值',max:20}],scoringOpen:true};renderJudgeEditor();startJudgeStatusPolling(1,'roadshow');`);
+  form.oninput();
+  const submit=form.querySelector('[type=submit]');submit.tagName='BUTTON';form.formControls=[submit];
+  const saving=form.onsubmit({preventDefault(){}});await started;
+  await h.fireTimer(1000);
+  assert.equal(submit.disabled,true);
+  finish();await saving;
+  assert.equal(h.run('scoreSavePending'),false);
+  assert.equal(submit.disabled,true);
+  assert.equal(h.element('save-draft').disabled,true);
+  assert.equal(form.elements.score0.value,'18.5');
+  assert.equal(form.elements.feedback.value,'保留的评语');
+  assert.equal(h.run('editorDirty'),true);
+  assert.match(h.element('score-form/.form-error').textContent,/已截止/);
+  assert.equal(h.requests.filter(r=>r.path.endsWith('/api/score')).length,1);
+});
+
 test('a late judge status response cannot update a different route', async () => {
   let finish;const h=browserHarness({fetch:async()=>new Promise(resolve=>{finish=()=>resolve({stage:'roadshow',scoringOpen:true});})});
   h.run("route='judge-roadshow';judgeStage='roadshow';routeVersion=1;judgeData={scoringOpen:false};startJudgeStatusPolling(1,'roadshow');");
@@ -336,22 +394,26 @@ test('a late judge status response cannot update a different route', async () =>
   assert.ok(![...h.timers.values()].some(t=>t.delay===1000));
 });
 
-test('organizer saves independent toggles and an explicitly Shanghai scheduled opening', async () => {
+test('organizer saves independent toggles and explicitly Shanghai opening and cutoff times', async () => {
   let settings;
-  const data={teams:[],judges:[],awards:[],finalists:[],qualification:{confirmed:false,ready:false},config:{roadshowOpensAt:1793509200000,scoringOpen:false,finalScoringOpen:true,finalIndependent:true,finalistCount:6,minJudges:1,finalMinJudges:6}};
+  const data={teams:[],judges:[],awards:[],finalists:[],qualification:{confirmed:false,ready:false},config:{roadshowOpensAt:1793509200000,roadshowClosesAt:1793520600000,scoringOpen:false,finalScoringOpen:true,finalIndependent:true,finalistCount:6,minJudges:1,finalMinJudges:6}};
   const h=browserHarness({fetch:async(url,options)=>{if(url.pathname.endsWith('/api/admin/settings')){settings=JSON.parse(options.body);return {ok:true};}return data;}});
   assert.equal(h.run('scheduleInput(1793509200000)'),'2026-11-01T13:00');
   assert.equal(h.run("scheduleEpoch('2026-11-01T13:00')"),1793509200000);
+  assert.equal(h.run('scheduleInput(1793520600000)'),'2026-11-01T16:10');
+  assert.equal(h.run("scheduleEpoch('2026-11-01T16:10')"),1793520600000);
   assert.equal(h.run("scheduleEpoch('')"),null);
   assert.throws(()=>h.run("scheduleEpoch('not a date')"),/有效的北京时间/);
   h.run("session={role:'admin'};");await h.run('renderRoute()');
   assert.ok(!h.element('platform-main').innerHTML.includes('name="activeStage"'));
+  assert.match(h.element('platform-main').innerHTML,/name="roadshowClosesAt" type="datetime-local" value="2026-11-01T16:10"/);
   data.qualification.confirmed=true;await h.run('renderAdmin(routeVersion)');
   const roadshowToggle=h.element('platform-main').innerHTML.match(/<input[^>]*name="scoringOpen"[^>]*>/)[0];
   assert.ok(!roadshowToggle.includes('disabled')); // Old reference lists cannot disable the independent switch.
-  const form=h.element('settings-form');form.elements.roadshowOpensAt.value='2026-11-01T13:00';form.elements.finalScoringOpen.checked=true;
+  const form=h.element('settings-form');form.elements.roadshowOpensAt.value='2026-11-01T13:00';form.elements.roadshowClosesAt.value='2026-11-01T16:10';form.elements.finalScoringOpen.checked=true;
   await form.onsubmit({preventDefault(){}});
   assert.equal(settings.roadshowOpensAt,1793509200000);
+  assert.equal(settings.roadshowClosesAt,1793520600000);
   assert.equal(settings.scoringOpen,false);
   assert.equal(settings.finalScoringOpen,true);
   assert.equal(settings.finalIndependent,true);

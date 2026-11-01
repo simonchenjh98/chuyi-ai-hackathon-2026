@@ -158,7 +158,8 @@ class EventService:
                                "finalScoringOpen": False, "finalResultsPublished": True,
                                "finalMinJudges": 6, "qualificationVersion": 0,
                                "finalIndependent": True, "roadshowOpensAt": None,
-                               "roadshowAutoOpenDone": False, "updatedAt": now_ms()}.items():
+                               "roadshowAutoOpenDone": False, "roadshowClosesAt": None,
+                               "roadshowAutoCloseDone": False, "updatedAt": now_ms()}.items():
                 db.execute("INSERT OR IGNORE INTO settings VALUES (?,?)", (key, json.dumps(value)))
             if not db.execute("SELECT 1 FROM accounts WHERE role='admin'").fetchone():
                 account, code = self.create_account(db, "admin", "活动管理员")
@@ -235,13 +236,25 @@ class EventService:
 
     def activate_scheduled_roadshow(self, db):
         cfg = self.config(db)
-        deadline = cfg["roadshowOpensAt"]
-        if deadline is None or cfg["roadshowAutoOpenDone"] or now_ms() < deadline:
+        current = now_ms()
+        closing_due = cfg["roadshowClosesAt"] is not None and current >= cfg["roadshowClosesAt"]
+        opening_due = cfg["roadshowOpensAt"] is not None and not cfg["roadshowAutoOpenDone"] and current >= cfg["roadshowOpensAt"]
+        if closing_due and cfg["roadshowAutoCloseDone"] and not cfg["scoringOpen"]:
+            return
+        if not closing_due and not opening_due:
             return
         if not db.in_transaction:
             db.execute("BEGIN IMMEDIATE")
-        # Recheck after taking the write lock so concurrent requests activate once.
+        # Recheck under the write lock. A closing deadline takes priority over an
+        # earlier opening plan, including an opening that has never fired.
         cfg = self.config(db)
+        if cfg["roadshowClosesAt"] is not None and now_ms() >= cfg["roadshowClosesAt"]:
+            if not cfg["roadshowAutoCloseDone"] or cfg["scoringOpen"]:
+                db.execute("UPDATE settings SET value='false' WHERE key='scoringOpen'")
+                db.execute("UPDATE settings SET value='true' WHERE key='roadshowAutoCloseDone'")
+                self.audit(db, None, "roadshow.auto-close", metadata={"scheduledAt": cfg["roadshowClosesAt"]})
+                self.touch(db)
+            return
         if cfg["roadshowOpensAt"] is None or cfg["roadshowAutoOpenDone"] or now_ms() < cfg["roadshowOpensAt"]:
             return
         db.execute("UPDATE settings SET value='true' WHERE key IN ('scoringOpen','roadshowAutoOpenDone')")
@@ -444,7 +457,7 @@ class EventService:
 
     def update_settings(self, db, actor, body):
         allowed = {"scoringOpen", "resultsPublished", "minJudges", "activeStage", "finalistCount",
-                   "finalScoringOpen", "finalResultsPublished", "finalMinJudges", "finalIndependent", "roadshowOpensAt"}
+                   "finalScoringOpen", "finalResultsPublished", "finalMinJudges", "finalIndependent", "roadshowOpensAt", "roadshowClosesAt"}
         if not body or not set(body).issubset(allowed):
             raise APIError(400, "设置字段不正确")
         old = self.config(db)
@@ -459,12 +472,14 @@ class EventService:
             elif key == "activeStage":
                 if not isinstance(value, str) or value not in STAGES:
                     raise APIError(400, "活动阶段不正确")
-            elif key == "roadshowOpensAt":
+            elif key in {"roadshowOpensAt", "roadshowClosesAt"}:
                 if value is not None and (type(value) is not int or not 0 <= value < 9007199254740992):
-                    raise APIError(400, "路演开放时间必须为毫秒时间戳或 null")
+                    raise APIError(400, "路演开放或截止时间必须为毫秒时间戳或 null")
             elif type(value) is not bool:
                 raise APIError(400, "开放与公开状态必须为布尔值")
         merged = {**old, **body}
+        if merged["scoringOpen"] and merged["roadshowClosesAt"] is not None and now_ms() >= merged["roadshowClosesAt"]:
+            raise APIError(409, "路演评分已截止；如需重开，请先清空或延后截止时间")
         if merged["finalIndependent"] != old["finalIndependent"] and db.execute("SELECT 1 FROM final_scores LIMIT 1").fetchone():
             raise APIError(409, "决赛已有评分记录，不能切换是否依赖路演晋级")
         frozen = bool(db.execute("SELECT 1 FROM finalists").fetchone())
@@ -482,6 +497,8 @@ class EventService:
             db.execute("DELETE FROM award_winners")
         if "roadshowOpensAt" in body and body["roadshowOpensAt"] != old["roadshowOpensAt"]:
             db.execute("UPDATE settings SET value='false' WHERE key='roadshowAutoOpenDone'")
+        if "roadshowClosesAt" in body and body["roadshowClosesAt"] != old["roadshowClosesAt"]:
+            db.execute("UPDATE settings SET value='false' WHERE key='roadshowAutoCloseDone'")
         for key, value in body.items():
             db.execute("UPDATE settings SET value=? WHERE key=?", (json.dumps(value), key))
         self.touch(db)
@@ -498,9 +515,13 @@ class EventService:
     def dispatch(self, method, path, body, cookie, ip):
         """Return (JSON object or CSV bytes, optional session token, cookie action)."""
         with self.db() as db:
+            self.activate_scheduled_roadshow(db)
+            if db.in_transaction:
+                # Persist timer transitions even when the following request is
+                # denied (for example, the first late score submission).
+                db.commit()
             if method == "POST":
                 db.execute("BEGIN IMMEDIATE")
-            self.activate_scheduled_roadshow(db)
             actor = self.account(db, cookie)
             if method == "GET" and path == "/api/session":
                 return {"role": actor["role"] if actor else None, "name": actor["name"] if actor else "", "judgeStage": actor["judge_stage"] if actor and actor["role"] == "judge" else None}, None, None
@@ -571,7 +592,8 @@ class EventService:
                 cfg = self.config(db)
                 return {"stage": actor["judge_stage"], "scoringOpen": cfg["scoringOpen"] if actor["judge_stage"] == "roadshow" else cfg["finalScoringOpen"],
                         "serverTime": now_ms(), "roadshowOpensAt": cfg["roadshowOpensAt"],
-                        "roadshowAutoOpenDone": cfg["roadshowAutoOpenDone"], "finalIndependent": cfg["finalIndependent"]}, None, None
+                        "roadshowAutoOpenDone": cfg["roadshowAutoOpenDone"], "roadshowClosesAt": cfg["roadshowClosesAt"],
+                        "roadshowAutoCloseDone": cfg["roadshowAutoCloseDone"], "finalIndependent": cfg["finalIndependent"]}, None, None
             if method == "GET" and (path == "/api/judge" or path.startswith("/api/judge/")):
                 self.require(actor, "judge")
                 stage = actor["judge_stage"] if path == "/api/judge" else path[len("/api/judge/"):]
@@ -587,7 +609,8 @@ class EventService:
                         "dimensions": DIMENSIONS if stage == "roadshow" else AWARDS,
                         "scoringOpen": cfg["scoringOpen"] if stage == "roadshow" else cfg["finalScoringOpen"],
                         "name": actor["name"], "config": cfg, "serverTime": now_ms(),
-                        "roadshowOpensAt": cfg["roadshowOpensAt"], "roadshowAutoOpenDone": cfg["roadshowAutoOpenDone"]}, None, None
+                        "roadshowOpensAt": cfg["roadshowOpensAt"], "roadshowAutoOpenDone": cfg["roadshowAutoOpenDone"],
+                        "roadshowClosesAt": cfg["roadshowClosesAt"], "roadshowAutoCloseDone": cfg["roadshowAutoCloseDone"]}, None, None
             if method == "POST" and path == "/api/score":
                 self.require(actor, "judge")
                 if not set(body).issubset({"stage", "teamId", "scores", "feedback", "status"}):
@@ -595,6 +618,8 @@ class EventService:
                 stage = body.get("stage")
                 self.judge_stage(actor, stage)
                 cfg = self.config(db)
+                if stage == "roadshow" and cfg["roadshowClosesAt"] is not None and now_ms() >= cfg["roadshowClosesAt"]:
+                    raise APIError(409, "路演评分已截止，不能再提交、修改、保存草稿或回避")
                 if not cfg["scoringOpen" if stage == "roadshow" else "finalScoringOpen"] or (not cfg["finalIndependent"] and cfg["activeStage"] != stage):
                     raise APIError(409, "当前阶段评分尚未开放或已关闭")
                 if not cfg["finalIndependent"] and stage == "roadshow" and db.execute("SELECT 1 FROM finalists").fetchone():
@@ -618,6 +643,8 @@ class EventService:
                 values, total = [], None
                 if status != "recused":
                     values, total = self.check_scores(body.get("scores"), dimensions)
+                if stage == "roadshow" and cfg["roadshowClosesAt"] is not None and now_ms() >= cfg["roadshowClosesAt"]:
+                    raise APIError(409, "路演评分已截止，不能再提交、修改、保存草稿或回避")
                 db.execute(f"""INSERT INTO {table} VALUES (?,?,?,?,?,?,?) ON CONFLICT(judge_id,team_id) DO UPDATE SET
                   scores_json=excluded.scores_json,total_tenths=excluded.total_tenths,feedback=excluded.feedback,status=excluded.status,updated_at=excluded.updated_at""",
                            (actor["id"], team_id, json.dumps(values), total, feedback, status, now_ms()))

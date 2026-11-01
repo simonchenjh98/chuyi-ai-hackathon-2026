@@ -1,5 +1,6 @@
 """Isolated HTTP coverage for project collection; never modifies live event records."""
 import io
+import http.client
 import json
 from pathlib import Path
 import tempfile
@@ -109,8 +110,31 @@ class SubmissionTests(unittest.TestCase):
         self.assertEqual(self.upload(token, name="../secret.html")[0], 400)
         self.assertEqual(self.upload(token, name="script.exe")[0], 400)
         self.assertEqual(self.upload(token, raw=b"")[0], 400)
-        self.assertEqual(self.request("POST", "upload/web", token, raw=b"x", headers={"Content-Type": "application/octet-stream", "X-File-Name": "demo.html", "Content-Length": str(100*1024*1024+1)})[0], 413)
+        self.assertEqual(self.request("POST", "upload/web", "invalid-token", raw=b"x", headers={"Content-Type": "application/octet-stream", "X-File-Name": "demo.html", "Content-Length": str(100*1024*1024+1)})[0], 401)
         self.assertEqual(self.public.request("POST", "/api/submissions/save", {"title": "x"}, headers={"Authorization": "Bearer " + token}, origin=False)[0], 403)
+
+    def test_streaming_upload_larger_than_100mb_has_no_size_cap(self):
+        token = self.login()
+        block = b"x" * (1024 * 1024)
+        size = len(block) * 101
+        conn = http.client.HTTPConnection("127.0.0.1", self.server.server_port, timeout=30)
+        try:
+            conn.putrequest("POST", self.service.base_path + "/api/submissions/upload/web")
+            for key, value in {"Origin": self.service.origin, "Authorization": "Bearer " + token,
+                               "Content-Type": "application/octet-stream", "X-File-Name": "large-project.zip",
+                               "Content-Length": str(size)}.items():
+                conn.putheader(key, value)
+            conn.endheaders()
+            for _ in range(101):
+                conn.send(block)
+            response = conn.getresponse()
+            value = json.loads(response.read())
+            self.assertEqual(response.status, 200, value)
+            self.assertEqual(value["files"][0]["size"], size)
+            self.assertEqual((self.service.submissions.directory / value["files"][0]["id"]).stat().st_size, size)
+        finally:
+            conn.close()
+        self.assertIsNone(self.public.get("/api/submissions/teams")[1]["maxFileSize"])
 
     def test_multiple_team_zip_and_kind_filters(self):
         one, two = self.login(1), self.login(2)

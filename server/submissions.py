@@ -15,7 +15,7 @@ import time
 from urllib.parse import quote, unquote, urlsplit
 import zipfile
 
-FILE_LIMIT = 100 * 1024 * 1024
+FILE_LIMIT = None
 FILE_COUNT = 6
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS project_submissions (
@@ -83,8 +83,10 @@ class SubmissionService:
             size = int(handler.headers.get("Content-Length", "-1"))
         except ValueError:
             raise self.error(400, "请求长度不正确")
-        if size < 0 or size > maximum:
-            raise self.error(413, "单个附件最大100MB" if maximum == FILE_LIMIT else "请求内容超过限制")
+        if size < 0:
+            raise self.error(400, "请求长度不正确")
+        if maximum is not None and size > maximum:
+            raise self.error(413, "请求内容超过限制")
         return size
 
     def read_json(self, handler):
@@ -216,7 +218,7 @@ class SubmissionService:
         temporary = None
         file_id = secrets.token_hex(16)
         try:
-            handler.connection.settimeout(180)
+            handler.connection.settimeout(3600)
             with tempfile.NamedTemporaryFile(dir=self.directory, prefix=".upload-", delete=False) as stream:
                 temporary = Path(stream.name)
                 remaining = size

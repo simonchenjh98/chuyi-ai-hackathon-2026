@@ -30,7 +30,7 @@ python -B server/app.py
 ## 学生作品提交与批量下载
 
 `submit.html` 中学生按报名队号选择本组即可进入，无需活动提交码或修改凭证。
-作品可上传 PPT/PPTX/PDF、HTML/HTM/ZIP，或填写在线演示链接；每组最多6个附件，每个100MB。
+作品可上传 PPT/PPTX/PDF、HTML/HTM/ZIP，或填写在线演示链接；每组最多6个附件，不限制单文件大小。
 支持同队多设备同时登录，任何设备选择本组即可继续修改作品；老师后台仍使用组织方管理码。
 作品记录在 SQLite，附件和临时 ZIP 位于私有 `CHUYI_DATA_DIR/project-files`，不进入源码或公开静态目录。
 

@@ -30,10 +30,10 @@ LOCATIONS = BEGIN + '''    location = /chuyi { return 308 /chuyi/; }
         proxy_set_header X-Forwarded-For $remote_addr;
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_request_buffering off;
-        proxy_read_timeout 180s;
-        proxy_send_timeout 180s;
-        client_body_timeout 180s;
-        client_max_body_size 101m;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+        client_body_timeout 3600s;
+        client_max_body_size 0;
     }
     location = /chuyi/api/submissions/download {
         proxy_pass http://127.0.0.1:5275;
@@ -43,8 +43,8 @@ LOCATIONS = BEGIN + '''    location = /chuyi { return 308 /chuyi/; }
         proxy_set_header X-Forwarded-For $remote_addr;
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_buffering off;
-        proxy_read_timeout 180s;
-        proxy_send_timeout 180s;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
         client_max_body_size 32k;
     }
     location ^~ /chuyi/ {

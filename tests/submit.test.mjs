@@ -48,3 +48,13 @@ test('students enter from any device using only team ID; teacher login keeps its
   assert.ok(!studentFlow.includes('elements.code'));assert.ok(!studentFlow.includes('receipt'));assert.ok(!html.includes('原浏览器'));assert.ok(!source.includes('backup-receipt'));
   a.run('renderAdminLogin()');assert.match(a.get('main').innerHTML,/组织方邀请码/);assert.match(a.get('main').innerHTML,/name="code"/);
 });
+test('large files reach upload without an application size ceiling; six-file limit remains',async()=>{
+  const a=app();
+  a.run(`globalThis.uploaded=[];mine={files:[]};setPending=value=>{pending=value};uploadOne=async file=>{uploaded.push(file.size)};request=async()=>({files:[]});renderFiles=()=>{};toast=()=>{};`);
+  await a.run(`uploadFiles([{name:'large.pptx',size:1024*1024*1024*20}],'ppt',{value:'selected'})`);
+  assert.equal(a.run('uploaded.length'),1);assert.equal(a.run('uploaded[0]'),20*1024*1024*1024);
+  assert.equal(a.get('save-error').textContent,'');
+  await a.run(`uploadFiles(Array.from({length:7},()=>({name:'file.pdf',size:1})),'ppt',{value:'selected'})`);
+  assert.equal(a.run('uploaded.length'),1);assert.match(a.get('save-error').textContent,/最多 6 个附件/);
+  assert.match(source,/xhr.timeout=0/);assert.ok(!source.includes('100 MB'));
+});

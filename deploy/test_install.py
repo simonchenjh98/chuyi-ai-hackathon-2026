@@ -61,15 +61,17 @@ class ReleaseIsolationTest(unittest.TestCase):
         upload = LOCATIONS.split('location ^~ /chuyi/api/submissions/upload/ {', 1)[1].split('}', 1)[0]
         download = LOCATIONS.split('location = /chuyi/api/submissions/download {', 1)[1].split('}', 1)[0]
         regular = LOCATIONS.split('location ^~ /chuyi/ {', 1)[1].split('}', 1)[0]
-        self.assertIn('client_max_body_size 101m;', upload)
+        self.assertIn('client_max_body_size 0;', upload)
         self.assertIn('proxy_request_buffering off;', upload)
-        self.assertIn('proxy_read_timeout 180s;', upload)
-        self.assertIn('client_body_timeout 180s;', upload)
+        self.assertIn('proxy_read_timeout 3600s;', upload)
+        self.assertIn('proxy_send_timeout 3600s;', upload)
+        self.assertIn('client_body_timeout 3600s;', upload)
         self.assertIn('client_max_body_size 32k;', download)
         self.assertIn('proxy_buffering off;', download)
-        self.assertIn('proxy_read_timeout 180s;', download)
+        self.assertIn('proxy_read_timeout 3600s;', download)
+        self.assertIn('proxy_send_timeout 3600s;', download)
         self.assertIn('client_max_body_size 32k;', regular)
-        self.assertEqual(LOCATIONS.count('client_max_body_size 101m;'), 1)
+        self.assertEqual(LOCATIONS.count('client_max_body_size 0;'), 1)
 
     def test_service_and_existing_gotc_stay_separate(self):
         self.assertEqual(str(ROOT).replace("\\", "/"), "/opt/chuyi-hackathon")

@@ -42,17 +42,16 @@ test('public team text cannot inject HTML or disclose unprovided judge data', ()
   assert.match(html,/&lt;img/);
 });
 
-test('screen mode rotates eight teams and leaves full metrics intact', () => {
-  const data = {teams:Array.from({length:10},(_,i)=>team(i+1)),config:cfg};
-  const first = renderer(true)(data);
-  const second = renderer(true,13000)(data);
-  assert.match(first,/第 1 \/ 2 屏/);
-  assert.ok(first.includes('TEAM-8'));
-  assert.ok(!first.includes('TEAM-9'));
-  assert.match(second,/第 2 \/ 2 屏/);
-  assert.ok(second.includes('TEAM-9'));
-  assert.ok(!second.includes('TEAM-1<'));
-  assert.match(second,/>10<\/strong>/);
+test('roadshow screen shows all 23 teams continuously at every refresh', () => {
+  const data = {teams:Array.from({length:23},(_,i)=>team(i+1)),config:cfg};
+  for(const elapsed of [0,13000,37000]){
+    const html = renderer(true,elapsed)(data);
+    assert.equal((html.match(/class="team-number"/g)||[]).length,23);
+    for(let n=1;n<=23;n++)assert.ok(html.includes(`TEAM-${n}<`));
+    assert.ok(html.indexOf('TEAM-1<')<html.indexOf('TEAM-23<'));
+    assert.match(html,/全部 23 支队伍 · 上下滚动查看/);
+    assert.doesNotMatch(html,/第 \d+ \/ \d+ 屏|轮播/);
+  }
 });
 
 test('unpublished scores and an empty event have explicit states', () => {
@@ -190,7 +189,7 @@ function browserHarness({hash='#admin', confirm=()=>false, fetch}={}) {
   const context = vm.createContext({
     document:{getElementById:element, querySelectorAll:selector=>selector==='[data-team]'?[...element('team-picker').innerHTML.matchAll(/data-team="([^"]+)"/g)].map(([,id])=>{const button=element(`team:${id}`);button.dataset={team:id};return button;}):[], body:{classList:{contains:()=>false, remove(){}, toggle(){}}}},
     location:{href:`https://example.test/chuyi/platform.html${hash}`, hash},
-    window:{addEventListener:(name,handler)=>listeners.set(name,handler),localStorage,sessionStorage},
+    window:{addEventListener:(name,handler)=>listeners.set(name,handler),localStorage,sessionStorage,scrollX:0,scrollY:0,scrollTo(x,y){this.scrollX=x;this.scrollY=y;}},
     URL, Date, AbortController,crypto:webcrypto,setTimeout:(callback,delay)=>{timers.set(++timerId,{callback,delay});return timerId;},clearTimeout:id=>timers.delete(id),confirm,
     fetch:async(url,options)=>{
       requests.push({path:url.pathname, options});
@@ -478,6 +477,20 @@ test('GET and POST requests time out and uncertain writes are not automatically 
   await assert.rejects(saving,/操作可能已送达/);
   assert.equal(h.requests.length,2);
   assert.equal(h.timers.size,0);
+});
+
+test('roadshow refresh keeps the current page and table scroll position', () => {
+  const h=browserHarness({hash:'#board-roadshow'}),content=h.element('board-content');
+  let table={scrollLeft:45,scrollTop:70},markup='';
+  content.querySelector=()=>table;
+  Object.defineProperty(content,'innerHTML',{get:()=>markup,set:value=>{
+    markup=value;table={scrollLeft:0,scrollTop:0};h.context.window.scrollTo(0,0);
+  }});
+  h.context.window.scrollTo(0,1200);
+  h.run("boardStage='roadshow';updateBoardContent({teams:[],config:{}})");
+  assert.equal(h.context.window.scrollY,1200);
+  assert.equal(table.scrollLeft,45);
+  assert.equal(table.scrollTop,70);
 });
 
 test('board polling waits for each request, preserves stale data, then recovers automatically', async () => {

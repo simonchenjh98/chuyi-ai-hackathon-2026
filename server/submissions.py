@@ -28,6 +28,10 @@ CREATE TABLE IF NOT EXISTS project_files (
  kind TEXT NOT NULL CHECK(kind IN ('ppt','web')), size INTEGER NOT NULL, created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS project_files_team ON project_files(team_id);
+CREATE TABLE IF NOT EXISTS project_submission_tokens (
+ token_hash TEXT PRIMARY KEY, team_id TEXT NOT NULL REFERENCES teams(id), created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS project_submission_tokens_team ON project_submission_tokens(team_id);
 """
 
 
@@ -61,7 +65,8 @@ class SubmissionService:
         return hashlib.sha256(value[7:].encode()).hexdigest()
 
     def student(self, db, handler):
-        row = db.execute("SELECT team_id FROM project_submissions WHERE token_hash=?", (self.token(handler),)).fetchone()
+        hashed = self.token(handler)
+        row = db.execute("SELECT team_id FROM project_submissions WHERE token_hash=? UNION ALL SELECT team_id FROM project_submission_tokens WHERE token_hash=? LIMIT 1", (hashed, hashed)).fetchone()
         if not row:
             raise self.error(401, "提交凭证已失效，请重新登录或联系老师")
         return row["team_id"]
@@ -154,15 +159,14 @@ class SubmissionService:
                     raise self.error(404, "队伍不存在")
                 existing = db.execute("SELECT token_hash FROM project_submissions WHERE team_id=?", (team_id,)).fetchone()
                 receipt = body.get("receipt", "")
-                if existing and existing["token_hash"]:
-                    if not isinstance(receipt, str) or not re.fullmatch(r"[A-Za-z0-9_-]{40,100}", receipt) or not hmac.compare_digest(hashlib.sha256(receipt.encode()).hexdigest(), existing["token_hash"]):
-                        raise self.error(409, "该队已在其他设备登记，请使用原设备或提交凭证，换设备请联系老师重置")
+                if existing and existing["token_hash"] and isinstance(receipt, str) and re.fullmatch(r"[A-Za-z0-9_-]{40,100}", receipt) and hmac.compare_digest(hashlib.sha256(receipt.encode()).hexdigest(), existing["token_hash"]):
                     token = receipt
                 else:
                     token = secrets.token_urlsafe(36)
                     hashed = hashlib.sha256(token.encode()).hexdigest()
                     at = int(time.time()*1000)
-                    db.execute("INSERT INTO project_submissions(team_id,token_hash,updated_at,created_at) VALUES (?,?,?,?) ON CONFLICT(team_id) DO UPDATE SET token_hash=excluded.token_hash", (team_id, hashed, at, at))
+                    db.execute("INSERT OR IGNORE INTO project_submissions(team_id,token_hash,updated_at,created_at) VALUES (?,?,?,?)", (team_id, hashed, at, at))
+                    db.execute("INSERT INTO project_submission_tokens(token_hash,team_id,created_at) VALUES (?,?,?)", (hashed, team_id, at))
                 value = {"token": token, "receipt": token, **self.mine(db, team_id)}
             elif method == "GET" and path == "/api/submissions/mine":
                 value = self.mine(db, self.student(db, handler))
@@ -186,6 +190,7 @@ class SubmissionService:
                 if not db.execute("SELECT 1 FROM teams WHERE id=?", (team_id,)).fetchone():
                     raise self.error(404, "队伍不存在")
                 db.execute("UPDATE project_submissions SET token_hash='' WHERE team_id=?", (team_id,))
+                db.execute("DELETE FROM project_submission_tokens WHERE team_id=?", (team_id,))
                 self.service.audit(db, actor, "submission.reset", target=team_id)
                 value = {"ok": True}
             else:

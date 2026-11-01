@@ -49,13 +49,21 @@ class SubmissionTests(unittest.TestCase):
         return self.request("POST", "upload/" + kind, token, raw=raw,
                             headers={"Content-Type": "application/octet-stream", "X-File-Name": quote(name)})
 
-    def test_sorted_public_status_and_receipt_protection(self):
+    def test_sorted_public_status_and_multiple_devices_preserve_work(self):
         status, data, _ = self.public.get("/api/submissions/teams")
         self.assertEqual(status, 200)
         self.assertEqual([t["number"] for t in data["teams"]], [1, 2, 12])
         self.assertNotIn("submission", data["teams"][0])
         token = self.login()
-        self.assertEqual(self.public.post("/api/submissions/login", {"teamId": self.ids[1]})[0], 409)
+        self.assertEqual(self.upload(token)[0], 200)
+        self.assertEqual(self.request("POST", "save", token, {"title": "已交作品", "demoUrl": "https://example.com/demo"})[0], 200)
+        status, other_device, _ = self.public.post("/api/submissions/login", {"teamId": self.ids[1]})
+        self.assertEqual(status, 200)
+        self.assertNotEqual(other_device["token"], token)
+        self.assertEqual(other_device["submission"]["title"], "已交作品")
+        self.assertEqual(len(other_device["files"]), 1)
+        self.assertEqual(self.request("GET", "mine", token)[0], 200)
+        self.assertEqual(self.request("GET", "mine", other_device["token"])[0], 200)
         status, value, _ = self.public.post("/api/submissions/login", {"teamId": self.ids[1], "receipt": token})
         self.assertEqual(status, 200)
         self.assertEqual(value["token"], token)

@@ -56,6 +56,9 @@ CREATE TABLE IF NOT EXISTS sessions (
  token_hash TEXT PRIMARY KEY, account_id TEXT NOT NULL REFERENCES accounts(id), expires_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS sessions_expiry ON sessions(expires_at);
+CREATE TABLE IF NOT EXISTS roadshow_devices (
+ device_hash TEXT PRIMARY KEY, account_id TEXT NOT NULL UNIQUE REFERENCES accounts(id), created_at INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS teams (
  id TEXT PRIMARY KEY, number INTEGER NOT NULL UNIQUE, name TEXT NOT NULL,
  project TEXT NOT NULL DEFAULT '', track TEXT NOT NULL DEFAULT '', updated_at INTEGER NOT NULL
@@ -77,7 +80,7 @@ CREATE TABLE IF NOT EXISTS finalists (
  roadshow_score REAL NOT NULL, version INTEGER NOT NULL, confirmed_at INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS award_winners (
- award_id TEXT PRIMARY KEY, team_id TEXT NOT NULL REFERENCES finalists(team_id), confirmed_at INTEGER NOT NULL
+ award_id TEXT PRIMARY KEY, team_id TEXT NOT NULL REFERENCES teams(id), confirmed_at INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS votes (
  account_id TEXT NOT NULL REFERENCES accounts(id), team_id TEXT NOT NULL REFERENCES teams(id), created_at INTEGER NOT NULL,
@@ -148,11 +151,14 @@ class EventService:
             db.executescript(SCHEMA)
             if "judge_stage" not in {r["name"] for r in db.execute("PRAGMA table_info(accounts)")}:
                 db.execute("ALTER TABLE accounts ADD COLUMN judge_stage TEXT NOT NULL DEFAULT 'roadshow'")
+            self.migrate_award_winner_fk(db)
             self.initialize_final_scoring(db)
             for key, value in {"scoringOpen": False, "resultsPublished": True, "minJudges": 1,
                                "activeStage": "roadshow", "finalistCount": 6,
                                "finalScoringOpen": False, "finalResultsPublished": True,
-                               "finalMinJudges": 6, "qualificationVersion": 0, "updatedAt": now_ms()}.items():
+                               "finalMinJudges": 6, "qualificationVersion": 0,
+                               "finalIndependent": True, "roadshowOpensAt": None,
+                               "roadshowAutoOpenDone": False, "updatedAt": now_ms()}.items():
                 db.execute("INSERT OR IGNORE INTO settings VALUES (?,?)", (key, json.dumps(value)))
             if not db.execute("SELECT 1 FROM accounts WHERE role='admin'").fetchone():
                 account, code = self.create_account(db, "admin", "活动管理员")
@@ -216,6 +222,45 @@ class EventService:
         elif json.loads(version["value"]) != FINAL_SCORING_VERSION:
             raise RuntimeError("Unsupported final scoring version; explicit migration is required before startup")
 
+    def migrate_award_winner_fk(self, db):
+        if any(row["table"] == "finalists" for row in db.execute("PRAGMA foreign_key_list(award_winners)")):
+            db.execute("BEGIN IMMEDIATE")
+            db.execute("CREATE TABLE award_winners_independent (award_id TEXT PRIMARY KEY,team_id TEXT NOT NULL REFERENCES teams(id),confirmed_at INTEGER NOT NULL)")
+            db.execute("INSERT INTO award_winners_independent SELECT * FROM award_winners")
+            db.execute("DROP TABLE award_winners")
+            db.execute("ALTER TABLE award_winners_independent RENAME TO award_winners")
+            self.audit(db, None, "schema.independent-final-awards")
+
+    def activate_scheduled_roadshow(self, db):
+        cfg = self.config(db)
+        deadline = cfg["roadshowOpensAt"]
+        if deadline is None or cfg["roadshowAutoOpenDone"] or now_ms() < deadline:
+            return
+        if not db.in_transaction:
+            db.execute("BEGIN IMMEDIATE")
+        # Recheck after taking the write lock so concurrent requests activate once.
+        cfg = self.config(db)
+        if cfg["roadshowOpensAt"] is None or cfg["roadshowAutoOpenDone"] or now_ms() < cfg["roadshowOpensAt"]:
+            return
+        db.execute("UPDATE settings SET value='true' WHERE key IN ('scoringOpen','roadshowAutoOpenDone')")
+        self.audit(db, None, "roadshow.auto-open", metadata={"scheduledAt": cfg["roadshowOpensAt"]})
+        self.touch(db)
+
+    def device_roadshow_account(self, db, device_token):
+        if not isinstance(device_token, str) or not re.fullmatch(r"[A-Za-z0-9_-]{32,128}", device_token):
+            raise APIError(400, "设备标识格式不正确，请刷新页面后重试")
+        digest = hashlib.sha256(device_token.encode()).hexdigest()
+        mapped = db.execute("SELECT a.* FROM roadshow_devices d JOIN accounts a ON a.id=d.account_id WHERE d.device_hash=?", (digest,)).fetchone()
+        if mapped:
+            if not mapped["active"] or mapped["role"] != "judge" or mapped["judge_stage"] != "roadshow":
+                raise APIError(401, "此设备的路演评委身份已停用，请联系组织方")
+            return mapped
+        number = db.execute("SELECT COUNT(*) FROM roadshow_devices").fetchone()[0] + 1
+        account, _ = self.create_account(db, "judge", f"路演评委 {number:02d}", "roadshow")
+        db.execute("INSERT INTO roadshow_devices VALUES (?,?,?)", (digest, account["id"], now_ms()))
+        self.audit(db, account, "roadshow.device-created")
+        return db.execute("SELECT * FROM accounts WHERE id=?", (account["id"],)).fetchone()
+
     def touch(self, db):
         db.execute("UPDATE settings SET value=? WHERE key='updatedAt'", (json.dumps(now_ms()),))
 
@@ -232,7 +277,7 @@ class EventService:
                    (account_id, role, name, salt, scrypt_hash(code, salt), now_ms(), judge_stage))
         return {"id": account_id, "role": role, "name": name, "judgeStage": judge_stage if role == "judge" else None}, code
 
-    def rate_limit(self, ip, role):
+    def rate_limit(self, ip, role, per_ip_limit=20):
         current = time.monotonic()
         with self.rate_lock:
             # Nginx's trusted X-Real-IP is used only for loopback peers.
@@ -240,7 +285,7 @@ class EventService:
                 bucket = self.login_attempts[key]
                 while bucket and bucket[0] < current - 60:
                     bucket.popleft()
-                limit = 20 if key[0] == "ip" else 400
+                limit = per_ip_limit if key[0] == "ip" else 400
                 if len(bucket) >= limit:
                     raise APIError(429, "登录尝试过于频繁，请一分钟后重试")
             for key in [("ip", ip, role), ("global", role)]:
@@ -310,7 +355,8 @@ class EventService:
         cfg = self.config(db)
         visible = not public or cfg["finalResultsPublished"]
         finalists = []
-        for row in db.execute("SELECT t.*,f.roadshow_score FROM finalists f JOIN teams t ON t.id=f.team_id ORDER BY f.position"):
+        query = "SELECT t.*,NULL AS roadshow_score FROM teams t ORDER BY t.number" if cfg["finalIndependent"] else "SELECT t.*,f.roadshow_score FROM finalists f JOIN teams t ON t.id=f.team_id ORDER BY f.position"
+        for row in db.execute(query):
             scores = [json.loads(r[0]) for r in db.execute("SELECT scores_json FROM final_scores WHERE team_id=? AND status='submitted'", (row["id"],))]
             count = len(scores)
             tenths = [sum(int(Decimal(str(v[i])) * 10) for v in scores) for i in range(len(AWARDS))]
@@ -323,7 +369,8 @@ class EventService:
                               "finalTotals": [total / 10 for total in tenths] if count and visible else [None] * len(AWARDS),
                               "finalTotal": sum(tenths) / 10 if count and visible else None,
                               "finalReady": ready and visible})
-        complete = bool(finalists) and all(t["finalJudgeCount"] >= cfg["finalMinJudges"] for t in finalists)
+        participating = [t for t in finalists if t["finalJudgeCount"] > 0] if cfg["finalIndependent"] else finalists
+        complete = bool(participating) and all(t["finalJudgeCount"] >= cfg["finalMinJudges"] for t in participating)
         winners = {r["award_id"]: r["team_id"] for r in db.execute("SELECT * FROM award_winners")}
 
         def award_result(award, value):
@@ -339,7 +386,7 @@ class EventService:
                               lambda t, i=index: t["finalTotals"][i]) for index, award in enumerate(AWARDS)]
         mvp = award_result({"id": "mvp", "name": "全场MVP", "max": 100 * FINAL_JUDGE_LIMIT}, lambda t: t["finalTotal"])
         # An unannounced roadshow result must not leak through the final roster or award candidates.
-        if public and not cfg["resultsPublished"]:
+        if public and not cfg["finalIndependent"] and not cfg["resultsPublished"]:
             finalists = []
             awards = [{**a, "score": None, "leaders": [], "winner": None,
                        "winnerConfirmed": False, "tied": False, "ready": False} for a in awards]
@@ -352,6 +399,7 @@ class EventService:
         finalists, awards, mvp = self.final_results(db, public)
         return {"teams": self.teams(db, public), "config": cfg,
                 "qualification": self.qualification(db, public), "finalists": finalists, "awards": awards, "mvp": mvp,
+                "finalParticipationCount": sum(t["finalJudgeCount"] > 0 for t in finalists),
                 "updatedAt": cfg["updatedAt"], "serverTime": now_ms()}
 
     def judge_stage(self, actor, stage):
@@ -394,7 +442,7 @@ class EventService:
 
     def update_settings(self, db, actor, body):
         allowed = {"scoringOpen", "resultsPublished", "minJudges", "activeStage", "finalistCount",
-                   "finalScoringOpen", "finalResultsPublished", "finalMinJudges"}
+                   "finalScoringOpen", "finalResultsPublished", "finalMinJudges", "finalIndependent", "roadshowOpensAt"}
         if not body or not set(body).issubset(allowed):
             raise APIError(400, "设置字段不正确")
         old = self.config(db)
@@ -409,26 +457,34 @@ class EventService:
             elif key == "activeStage":
                 if not isinstance(value, str) or value not in STAGES:
                     raise APIError(400, "活动阶段不正确")
+            elif key == "roadshowOpensAt":
+                if value is not None and (type(value) is not int or not 0 <= value < 9007199254740992):
+                    raise APIError(400, "路演开放时间必须为毫秒时间戳或 null")
             elif type(value) is not bool:
                 raise APIError(400, "开放与公开状态必须为布尔值")
         merged = {**old, **body}
+        if merged["finalIndependent"] != old["finalIndependent"] and db.execute("SELECT 1 FROM final_scores LIMIT 1").fetchone():
+            raise APIError(409, "决赛已有评分记录，不能切换是否依赖路演晋级")
         frozen = bool(db.execute("SELECT 1 FROM finalists").fetchone())
-        if frozen and (merged["scoringOpen"] or merged["finalistCount"] != old["finalistCount"] or merged["minJudges"] != old["minJudges"]):
+        if not merged["finalIndependent"] and frozen and (merged["scoringOpen"] or merged["finalistCount"] != old["finalistCount"] or merged["minJudges"] != old["minJudges"]):
             raise APIError(409, "晋级名单已冻结，不能重开路演或更改路演资格规则")
-        if merged["activeStage"] == "final" and not frozen:
+        if not merged["finalIndependent"] and merged["activeStage"] == "final" and not frozen:
             raise APIError(409, "请先确认并冻结晋级名单")
-        if merged["scoringOpen"] and merged["activeStage"] != "roadshow":
+        if not merged["finalIndependent"] and merged["scoringOpen"] and merged["activeStage"] != "roadshow":
             raise APIError(409, "路演评分仅可在路演阶段开放")
-        if merged["finalScoringOpen"] and (not frozen or merged["activeStage"] != "final"):
+        if not merged["finalIndependent"] and merged["finalScoringOpen"] and (not frozen or merged["activeStage"] != "final"):
             raise APIError(409, "决赛评分需先冻结晋级名单并切换至决赛阶段")
-        if merged["scoringOpen"] and merged["finalScoringOpen"]:
+        if not merged["finalIndependent"] and merged["scoringOpen"] and merged["finalScoringOpen"]:
             raise APIError(409, "两个评审阶段不能同时开放")
-        if merged["finalScoringOpen"] or merged["finalMinJudges"] != old["finalMinJudges"]:
+        if merged["finalScoringOpen"] or merged["finalMinJudges"] != old["finalMinJudges"] or merged["finalIndependent"] != old["finalIndependent"]:
             db.execute("DELETE FROM award_winners")
+        if "roadshowOpensAt" in body and body["roadshowOpensAt"] != old["roadshowOpensAt"]:
+            db.execute("UPDATE settings SET value='false' WHERE key='roadshowAutoOpenDone'")
         for key, value in body.items():
             db.execute("UPDATE settings SET value=? WHERE key=?", (json.dumps(value), key))
         self.touch(db)
         self.audit(db, actor, "settings", metadata=body)
+        self.activate_scheduled_roadshow(db)
         return {"ok": True, "config": self.config(db)}
 
     def require(self, actor, role):
@@ -440,32 +496,56 @@ class EventService:
     def dispatch(self, method, path, body, cookie, ip):
         """Return (JSON object or CSV bytes, optional session token, cookie action)."""
         with self.db() as db:
+            if method == "POST":
+                db.execute("BEGIN IMMEDIATE")
+            self.activate_scheduled_roadshow(db)
             actor = self.account(db, cookie)
             if method == "GET" and path == "/api/session":
                 return {"role": actor["role"] if actor else None, "name": actor["name"] if actor else "", "judgeStage": actor["judge_stage"] if actor and actor["role"] == "judge" else None}, None, None
             if method == "GET" and path == "/api/board":
                 config = self.config(db)
                 return self.board(db), None, None
-            if method == "POST":
-                db.execute("BEGIN IMMEDIATE")
             if method == "POST" and path == "/api/login":
                 role = body.get("role")
                 if not isinstance(role, str) or role not in {"admin", "judge", "audience"}:
                     raise APIError(400, "登录身份不正确")
-                self.rate_limit(ip, role)
                 code = text_field(body.get("code"), "邀请码", 160, True)
+                requested_stage = body.get("judgeStage") if role == "judge" else None
+                if requested_stage is not None and (not isinstance(requested_stage, str) or requested_stage not in STAGES):
+                    raise APIError(400, "评委阶段不正确")
                 selector = body.get("accountId")
                 if selector is not None and (not isinstance(selector, str) or len(selector) > 80):
                     raise APIError(400, "登录身份不正确")
                 shared_code = self.shared_login_codes.get(role)
-                if selector is None and shared_code and hmac.compare_digest(code.encode(), shared_code.encode()):
-                    candidates = db.execute("SELECT id,name,judge_stage FROM accounts WHERE role=? AND active=1 ORDER BY created_at,id", (role,)).fetchall()
-                    if len(candidates) > 1:
-                        return {"selectAccount": True, "accounts": [{"id": a["id"], "name": a["name"], "judgeStage": a["judge_stage"]} for a in candidates]}, None, None
-                    if candidates:
-                        selector = candidates[0]["id"]
-                selector = selector or code.split(".", 1)[0]
-                account = db.execute("SELECT * FROM accounts WHERE id=? AND role=? AND active=1", (selector, role)).fetchone()
+                valid_shared = shared_code is not None and hmac.compare_digest(code.encode(), shared_code.encode())
+                device_mode = role == "judge" and requested_stage == "roadshow"
+                valid_device = isinstance(body.get("deviceToken"), str) and re.fullmatch(r"[A-Za-z0-9_-]{32,128}", body["deviceToken"])
+                # Both stages share a school NAT/IP bucket. Valid shared-code final
+                # selection/login must keep the same limit as roadshow device login.
+                shared_judge_flow = role == "judge" and valid_shared and (not device_mode or valid_device)
+                self.rate_limit(ip, role, per_ip_limit=100 if shared_judge_flow else 20)
+                if device_mode:
+                    if selector is not None:
+                        raise APIError(400, "路演登录不需要选择身份")
+                    if not valid_shared:
+                        raise APIError(401, "邀请码无效或已停用")
+                    account = self.device_roadshow_account(db, body.get("deviceToken"))
+                else:
+                    if selector is None and valid_shared:
+                        query = "SELECT id,name,judge_stage FROM accounts WHERE role=? AND active=1"
+                        values = [role]
+                        if requested_stage is not None:
+                            query += " AND judge_stage=?"
+                            values.append(requested_stage)
+                        candidates = db.execute(query + " ORDER BY created_at,id", values).fetchall()
+                        if len(candidates) > 1:
+                            return {"selectAccount": True, "accounts": [{"id": a["id"], "name": a["name"], "judgeStage": a["judge_stage"]} for a in candidates]}, None, None
+                        if candidates:
+                            selector = candidates[0]["id"]
+                    selector = selector or code.split(".", 1)[0]
+                    account = db.execute("SELECT * FROM accounts WHERE id=? AND role=? AND active=1", (selector, role)).fetchone()
+                    if account and requested_stage is not None and account["judge_stage"] != requested_stage:
+                        raise APIError(403, "此身份不属于所选评审阶段")
                 salt = account["salt"] if account else b"chuyi-dummy-salt!"
                 hashed = scrypt_hash(code, salt)
                 if not account or not hmac.compare_digest(hashed, account["code_hash"]):
@@ -484,6 +564,12 @@ class EventService:
                     except (KeyError, ValueError, CookieError):
                         pass
                 return {"ok": True}, None, "clear"
+            if method == "GET" and path == "/api/judge/status":
+                self.require(actor, "judge")
+                cfg = self.config(db)
+                return {"stage": actor["judge_stage"], "scoringOpen": cfg["scoringOpen"] if actor["judge_stage"] == "roadshow" else cfg["finalScoringOpen"],
+                        "serverTime": now_ms(), "roadshowOpensAt": cfg["roadshowOpensAt"],
+                        "roadshowAutoOpenDone": cfg["roadshowAutoOpenDone"], "finalIndependent": cfg["finalIndependent"]}, None, None
             if method == "GET" and (path == "/api/judge" or path.startswith("/api/judge/")):
                 self.require(actor, "judge")
                 stage = actor["judge_stage"] if path == "/api/judge" else path[len("/api/judge/"):]
@@ -498,7 +584,8 @@ class EventService:
                 return {"stage": stage, "teams": teams, "myScores": scores,
                         "dimensions": DIMENSIONS if stage == "roadshow" else AWARDS,
                         "scoringOpen": cfg["scoringOpen"] if stage == "roadshow" else cfg["finalScoringOpen"],
-                        "name": actor["name"]}, None, None
+                        "name": actor["name"], "config": cfg, "serverTime": now_ms(),
+                        "roadshowOpensAt": cfg["roadshowOpensAt"], "roadshowAutoOpenDone": cfg["roadshowAutoOpenDone"]}, None, None
             if method == "POST" and path == "/api/score":
                 self.require(actor, "judge")
                 if not set(body).issubset({"stage", "teamId", "scores", "feedback", "status"}):
@@ -506,12 +593,12 @@ class EventService:
                 stage = body.get("stage")
                 self.judge_stage(actor, stage)
                 cfg = self.config(db)
-                if not cfg["scoringOpen" if stage == "roadshow" else "finalScoringOpen"] or cfg["activeStage"] != stage:
+                if not cfg["scoringOpen" if stage == "roadshow" else "finalScoringOpen"] or (not cfg["finalIndependent"] and cfg["activeStage"] != stage):
                     raise APIError(409, "当前阶段评分尚未开放或已关闭")
-                if stage == "roadshow" and db.execute("SELECT 1 FROM finalists").fetchone():
+                if not cfg["finalIndependent"] and stage == "roadshow" and db.execute("SELECT 1 FROM finalists").fetchone():
                     raise APIError(409, "晋级名单已冻结，不能修改路演评分")
                 team_id = self.team_exists(db, body.get("teamId"))
-                if stage == "final" and not db.execute("SELECT 1 FROM finalists WHERE team_id=?", (team_id,)).fetchone():
+                if not cfg["finalIndependent"] and stage == "final" and not db.execute("SELECT 1 FROM finalists WHERE team_id=?", (team_id,)).fetchone():
                     raise APIError(403, "此队伍未进入决赛")
                 table = "scores" if stage == "roadshow" else "final_scores"
                 dimensions = DIMENSIONS if stage == "roadshow" else AWARDS
@@ -579,13 +666,16 @@ class EventService:
                 if method == "POST" and path == "/api/admin/unqualify":
                     if body:
                         raise APIError(400, "撤销晋级不需要额外参数")
-                    if db.execute("SELECT 1 FROM final_scores WHERE status='submitted'").fetchone():
+                    independent = self.config(db)["finalIndependent"]
+                    if not independent and db.execute("SELECT 1 FROM final_scores WHERE status='submitted'").fetchone():
                         raise APIError(409, "决赛已有正式评分，不能撤销晋级名单")
-                    db.execute("DELETE FROM award_winners")
-                    db.execute("DELETE FROM final_scores")
+                    if not independent:
+                        db.execute("DELETE FROM award_winners")
+                        db.execute("DELETE FROM final_scores")
                     db.execute("DELETE FROM finalists")
-                    db.execute("UPDATE settings SET value='false' WHERE key='finalScoringOpen'")
-                    db.execute("UPDATE settings SET value='\"roadshow\"' WHERE key='activeStage'")
+                    if not independent:
+                        db.execute("UPDATE settings SET value='false' WHERE key='finalScoringOpen'")
+                        db.execute("UPDATE settings SET value='\"roadshow\"' WHERE key='activeStage'")
                     self.audit(db, actor, "qualification.revoke")
                     self.touch(db)
                     return {"ok": True}, None, None
@@ -598,7 +688,7 @@ class EventService:
                     if award is None:
                         raise APIError(400, "奖项不存在")
                     if not award["ready"]:
-                        raise APIError(409, "请先关闭决赛评分，并确保所有入围队伍达到有效评委门槛")
+                        raise APIError(409, "请先关闭决赛评分，并确保参评队伍均收齐6位评委评分")
                     if team_id not in award["leaders"]:
                         raise APIError(400, "只可确认本奖项最高分候选队伍")
                     db.execute("INSERT INTO award_winners VALUES (?,?,?) ON CONFLICT(award_id) DO UPDATE SET team_id=excluded.team_id,confirmed_at=excluded.confirmed_at", (award_id, team_id, now_ms()))
@@ -617,7 +707,7 @@ class EventService:
                         team_id = self.team_exists(db, team_id)
                         db.execute("UPDATE teams SET number=?,name=?,project=?,track=?,updated_at=? WHERE id=?", (number, name, project, track, now_ms(), team_id))
                     else:
-                        if db.execute("SELECT 1 FROM finalists").fetchone():
+                        if not self.config(db)["finalIndependent"] and db.execute("SELECT 1 FROM finalists").fetchone():
                             raise APIError(409, "晋级名单已冻结，不能新增队伍")
                         team_id = "T" + secrets.token_hex(8)
                         db.execute("INSERT INTO teams VALUES (?,?,?,?,?,?)", (team_id, number, name, project, track, now_ms()))

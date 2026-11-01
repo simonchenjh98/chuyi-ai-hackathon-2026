@@ -68,6 +68,8 @@ class APITests(unittest.TestCase):
         self.admin_code = (self.root / "private" / "admin-access.txt").read_text().splitlines()[1]
         status, _, _ = self.admin.post("/api/login", {"role": "admin", "code": self.admin_code})
         self.assertEqual(status, 200)
+        # These regression fixtures intentionally retain the original qualification workflow.
+        self.assertEqual(self.admin.post("/api/admin/settings", {"finalIndependent": False})[0], 200)
 
     def tearDown(self):
         self.server.shutdown()

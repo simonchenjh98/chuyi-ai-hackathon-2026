@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
+import {webcrypto} from 'node:crypto';
 
 const completeSource = fs.readFileSync(new URL('../platform.js', import.meta.url), 'utf8');
 const source = completeSource.split("window.addEventListener('beforeunload'")[0];
@@ -172,8 +173,9 @@ function browserHarness({hash='#admin', confirm=()=>false, fetch}={}) {
         if(!controls.has(key)) controls.set(key, {value:fields[key]||'', checked:false});
         return controls.get(key);
       }}),
-      querySelector:selector=>element(`${id}/${selector}`), querySelectorAll:()=>[],
+      querySelector:selector=>element(`${id}/${selector}`), querySelectorAll:()=>node.formControls||[],
       addEventListener(){}, setAttribute(){}, removeAttribute(){},
+      scrollIntoView(options){node.scrolledIntoView=options;},focus(options){node.focused=options||true;},
     };
     nodes.set(id,node);
     return node;
@@ -183,11 +185,13 @@ function browserHarness({hash='#admin', confirm=()=>false, fetch}={}) {
     qualification:{confirmed:false, ready:false},
     config:{activeStage:'roadshow', finalistCount:6, minJudges:1, finalMinJudges:6},
   };
+  const storage=()=>{const entries=new Map();return {getItem:key=>entries.get(key)||null,setItem:(key,value)=>entries.set(key,String(value))};};
+  const localStorage=storage(),sessionStorage=storage();
   const context = vm.createContext({
-    document:{getElementById:element, querySelectorAll:()=>[], body:{classList:{contains:()=>false, remove(){}, toggle(){}}}},
+    document:{getElementById:element, querySelectorAll:selector=>selector==='[data-team]'?[...element('team-picker').innerHTML.matchAll(/data-team="([^"]+)"/g)].map(([,id])=>{const button=element(`team:${id}`);button.dataset={team:id};return button;}):[], body:{classList:{contains:()=>false, remove(){}, toggle(){}}}},
     location:{href:`https://example.test/chuyi/platform.html${hash}`, hash},
-    window:{addEventListener:(name,handler)=>listeners.set(name,handler)},
-    URL, Date, AbortController, setTimeout:(callback,delay)=>{timers.set(++timerId,{callback,delay});return timerId;},clearTimeout:id=>timers.delete(id),confirm,
+    window:{addEventListener:(name,handler)=>listeners.set(name,handler),localStorage,sessionStorage},
+    URL, Date, AbortController,crypto:webcrypto,setTimeout:(callback,delay)=>{timers.set(++timerId,{callback,delay});return timerId;},clearTimeout:id=>timers.delete(id),confirm,
     fetch:async(url,options)=>{
       requests.push({path:url.pathname, options});
       const result = fetch ? await fetch(url,options) : data;
@@ -195,7 +199,7 @@ function browserHarness({hash='#admin', confirm=()=>false, fetch}={}) {
     },
   });
   vm.runInContext(eventSource,context);
-  return {context,nodes,requests,element,timers,run:code=>vm.runInContext(code,context),dispatch:name=>listeners.get(name)?.(),fireTimer:delay=>{const entry=[...timers].find(([,timer])=>timer.delay===delay);assert.ok(entry,`Expected a ${delay}ms timer`);timers.delete(entry[0]);return entry[1].callback();}};
+  return {context,nodes,requests,element,timers,localStorage,sessionStorage,run:code=>vm.runInContext(code,context),dispatch:(name,event={})=>listeners.get(name)?.(event),fireTimer:delay=>{const entry=[...timers].find(([,timer])=>timer.delay===delay);assert.ok(entry,`Expected a ${delay}ms timer`);timers.delete(entry[0]);return entry[1].callback();}};
 }
 
 test('shared judge login only offers identities from the current stage', () => {
@@ -224,7 +228,7 @@ test('shared final login selects a final identity and opens the matching judge w
   assert.ok(!form.elements.accountId.innerHTML.includes('ROADSHOW ONLY'));
   form.elements.accountId.value='F1';
   await form.onsubmit({preventDefault(){}});
-  assert.deepEqual(logins,[{role:'judge',code:'000000'},{role:'judge',code:'000000',accountId:'F1'}]);
+  assert.deepEqual(logins,[{role:'judge',code:'000000',judgeStage:'final'},{role:'judge',code:'000000',judgeStage:'final',accountId:'F1'}]);
   assert.equal(h.run('session.judgeStage'),'final');
   assert.equal(h.run('route'),'judge-final');
   assert.match(h.element('platform-main').innerHTML,/决赛评委工作台/);
@@ -232,13 +236,160 @@ test('shared final login selects a final identity and opens the matching judge w
   assert.ok(!h.requests.some(r=>r.path.endsWith('/api/judge/roadshow')));
 });
 
-test('a roadshow identity cannot render or request the final judge editor', async () => {
+test('a roadshow identity opens final login directly without an exit-identity blocker', async () => {
   const h=browserHarness({hash:'#judge-final'});
   h.run("session={role:'judge',judgeStage:'roadshow'};");
   await h.run('renderRoute()');
-  assert.match(h.element('platform-main').innerHTML,/当前身份是路演评委/);
-  assert.match(h.element('platform-main').innerHTML,/#judge-roadshow/);
+  assert.match(h.element('platform-main').innerHTML,/决赛评委登录/);
+  assert.ok(!h.element('platform-main').innerHTML.includes('退出并切换身份'));
   assert.equal(h.requests.length,0);
+});
+
+test('roadshow code logs in directly with a persistent device identity and no selection step', async () => {
+  const logins=[];
+  const h=browserHarness({hash:'#judge-roadshow',fetch:async(url,options)=>{
+    if(url.pathname.endsWith('/api/login')){logins.push(JSON.parse(options.body));return {ok:true};}
+    if(url.pathname.endsWith('/api/session'))return {role:'judge',name:'本机路演评委',judgeStage:'roadshow'};
+    return {teams:[],myScores:[],dimensions:[],scoringOpen:false,roadshowOpensAt:1793509200000};
+  }});
+  await h.run('renderRoute()');
+  const form=h.element('login-form');form.elements.code.value='000000';
+  await form.onsubmit({preventDefault(){}});
+  assert.equal(logins.length,1);
+  assert.equal(logins[0].judgeStage,'roadshow');
+  assert.match(logins[0].deviceToken,/^[a-f0-9]{64}$/);
+  assert.ok(!('accountId' in logins[0]));
+  assert.equal(h.element('identity-field').hidden,true);
+  assert.match(h.element('platform-main').innerHTML,/路演评委工作台/);
+  assert.match(h.element('platform-main').innerHTML,/13:00/);
+  assert.equal(h.run('roadshowDeviceToken()'),logins[0].deviceToken);
+  const other=browserHarness({hash:'#judge-roadshow'});
+  assert.notEqual(other.run('roadshowDeviceToken()'),logins[0].deviceToken);
+});
+
+test('roadshow identity falls back to session storage and never uses a shared default when storage fails', async () => {
+  const h=browserHarness({hash:'#judge-roadshow'});
+  h.run("window.localStorage={getItem(){throw new Error('blocked')},setItem(){throw new Error('blocked')}};");
+  const token=h.run('roadshowDeviceToken()');
+  assert.equal(token,h.sessionStorage.getItem('chuyi-roadshow-device-v1'));
+  assert.equal(h.run('roadshowDeviceToken()'),token);
+  h.run('window.localStorage=null;window.sessionStorage=null;');
+  await h.run('renderRoute()');
+  h.element('login-form').elements.code.value='000000';
+  await h.element('login-form').onsubmit({preventDefault(){}});
+  assert.equal(h.requests.length,0);
+  assert.match(h.element('login-form/.form-error').textContent,/无法保存本机评委身份/);
+});
+
+test('all 23 final team tags show completion and clicking a team opens its four score inputs', async () => {
+  const data={teams:Array.from({length:23},(_,i)=>team(i+1,{project:'项目待定'})),myScores:[{teamId:'T1',status:'submitted',scores:[25,25,25,25]},{teamId:'T2',status:'draft',scores:[20,20,20,20]}],dimensions:awards.map(a=>({id:a.id,name:a.name,max:25})),scoringOpen:true};
+  const h=browserHarness({hash:'#judge-final',fetch:async()=>data});
+  h.run("session={role:'judge',judgeStage:'final'};");await h.run('renderRoute()');
+  const tags=h.element('team-picker').innerHTML;
+  assert.equal((tags.match(/data-team=/g)||[]).length,23);
+  assert.match(tags,/data-team="T1" data-score-status="submitted"/);
+  assert.match(tags,/已评分 ✓/);
+  assert.match(tags,/<strong>TEAM-23<\/strong>/);
+  assert.ok(!tags.includes('<strong>项目待定</strong>'));
+  assert.ok(h.element('platform-main').innerHTML.indexOf('id="team-picker"')<h.element('platform-main').innerHTML.indexOf('id="judge-editor"'));
+  h.element('team:T23').onclick();
+  assert.equal(h.run('selectedTeam'),'T23');
+  assert.match(h.element('judge-editor').innerHTML,/<h2>TEAM-23<\/h2>/);
+  assert.equal((h.element('judge-editor').innerHTML.match(/max="25"/g)||[]).length,8);
+  assert.equal(h.element('judge-editor').scrolledIntoView.block,'start');
+  assert.equal(h.element('score-0').focused.preventScroll,true);
+  h.element('score-form').oninput();h.element('team:T2').onclick();
+  assert.equal(h.run('selectedTeam'),'T23'); // Canceling the dirty switch keeps the current team.
+});
+
+test('scheduled opening updates controls in place every second without replacing unsaved scores', async () => {
+  let calls=0;
+  const data={teams:[team(1)],myScores:[],dimensions:[{id:'problem',name:'问题价值',max:20}],scoringOpen:false,roadshowOpensAt:1793509200000,roadshowAutoOpenDone:false};
+  const h=browserHarness({hash:'#judge-roadshow',fetch:async(url)=>{
+    if(url.pathname.endsWith('/api/judge/status')){calls++;if(calls===1)throw new Error('OFFLINE');return {stage:'roadshow',scoringOpen:true,roadshowOpensAt:1793509200000,roadshowAutoOpenDone:true};}
+    return data;
+  }});
+  h.run("session={role:'judge',judgeStage:'roadshow'};");await h.run('renderRoute()');
+  const form=h.element('score-form');form.elements.score0.value='12.3';form.oninput();
+  const input={tagName:'INPUT',disabled:true};form.formControls=[input];
+  const editor=h.element('judge-editor').innerHTML;
+  await h.fireTimer(1000);
+  assert.match(h.element('workbench-status').textContent,/连接中断/);
+  assert.equal(form.elements.score0.value,'12.3');
+  await h.fireTimer(1000);
+  assert.equal(h.run('judgeData.scoringOpen'),true);
+  assert.equal(input.disabled,false);
+  assert.match(h.element('judge-availability').textContent,/路演评分开放中/);
+  assert.equal(h.element('judge-editor').innerHTML,editor);
+  assert.equal(form.elements.score0.value,'12.3');
+  assert.equal(h.run('editorDirty'),true);
+  assert.equal(h.requests.filter(r=>r.path.endsWith('/api/judge/roadshow')).length,1);
+});
+
+test('a late judge status response cannot update a different route', async () => {
+  let finish;const h=browserHarness({fetch:async()=>new Promise(resolve=>{finish=()=>resolve({stage:'roadshow',scoringOpen:true});})});
+  h.run("route='judge-roadshow';judgeStage='roadshow';routeVersion=1;judgeData={scoringOpen:false};startJudgeStatusPolling(1,'roadshow');");
+  const pending=h.fireTimer(1000);
+  h.run("route='admin';routeVersion=2;root.innerHTML='ADMIN PAGE';");
+  finish();await pending;
+  assert.equal(h.run('judgeData.scoringOpen'),false);
+  assert.equal(h.element('platform-main').innerHTML,'ADMIN PAGE');
+  assert.ok(![...h.timers.values()].some(t=>t.delay===1000));
+});
+
+test('organizer saves independent toggles and an explicitly Shanghai scheduled opening', async () => {
+  let settings;
+  const data={teams:[],judges:[],awards:[],finalists:[],qualification:{confirmed:false,ready:false},config:{roadshowOpensAt:1793509200000,scoringOpen:false,finalScoringOpen:true,finalIndependent:true,finalistCount:6,minJudges:1,finalMinJudges:6}};
+  const h=browserHarness({fetch:async(url,options)=>{if(url.pathname.endsWith('/api/admin/settings')){settings=JSON.parse(options.body);return {ok:true};}return data;}});
+  assert.equal(h.run('scheduleInput(1793509200000)'),'2026-11-01T13:00');
+  assert.equal(h.run("scheduleEpoch('2026-11-01T13:00')"),1793509200000);
+  assert.equal(h.run("scheduleEpoch('')"),null);
+  assert.throws(()=>h.run("scheduleEpoch('not a date')"),/有效的北京时间/);
+  h.run("session={role:'admin'};");await h.run('renderRoute()');
+  assert.ok(!h.element('platform-main').innerHTML.includes('name="activeStage"'));
+  data.qualification.confirmed=true;await h.run('renderAdmin(routeVersion)');
+  const roadshowToggle=h.element('platform-main').innerHTML.match(/<input[^>]*name="scoringOpen"[^>]*>/)[0];
+  assert.ok(!roadshowToggle.includes('disabled')); // Old reference lists cannot disable the independent switch.
+  const form=h.element('settings-form');form.elements.roadshowOpensAt.value='2026-11-01T13:00';form.elements.finalScoringOpen.checked=true;
+  await form.onsubmit({preventDefault(){}});
+  assert.equal(settings.roadshowOpensAt,1793509200000);
+  assert.equal(settings.scoringOpen,false);
+  assert.equal(settings.finalScoringOpen,true);
+  assert.equal(settings.finalIndependent,true);
+  assert.ok(!('activeStage' in settings));
+});
+
+test('final screen paginates all 23 teams as eight, eight and seven after the awards screen', () => {
+  const data=finalData();data.finalists=Array.from({length:23},(_,i)=>team(i+1,{finalTotal:null,finalTotals:[null,null,null,null],finalJudgeCount:0,finalReady:false}));
+  const pages=[13000,25000,37000].map(elapsed=>renderer(true,elapsed,'final')(data));
+  pages.forEach((html,i)=>{assert.match(html,new RegExp(`第 ${i+2} / 4 屏`));const body=html.match(/<tbody>([\s\S]*?)<\/tbody>/)[1];assert.equal((body.match(/<tr>/g)||[]).length,i===2?7:8);});
+  assert.match(pages[0],/TEAM-1<\/strong>/);assert.ok(!pages[0].includes('TEAM-9</strong>'));
+  assert.match(pages[1],/TEAM-9<\/strong>/);assert.match(pages[2],/TEAM-23<\/strong>/);
+});
+
+test('unscored teams do not keep completed award candidates pending and screen ties stay compact', () => {
+  const data=finalData();data.finalists.push(...Array.from({length:19},(_,i)=>team(i+5,{finalJudgeCount:0,finalReady:false,finalTotal:null,finalTotals:[null,null,null,null]})));
+  let html=renderer(false,0,'final')(data);
+  assert.match(cards(html)[0],/等待组织方确认/);
+  assert.ok(!cards(html)[0].includes('尚未定稿'));
+  const ids=data.finalists.map(t=>t.id);data.awards[0]={...data.awards[0],leaders:ids,tied:true};
+  html=renderer(true,0,'final')(data);
+  assert.match(cards(html)[0],/等 23 队并列/);
+  assert.ok(!cards(html)[0].includes('TEAM-23'));
+  assert.match(cards(renderer(false,0,'final')(data))[0],/TEAM-23/);
+});
+
+test('score notifications request an immediate board refresh without overlapping an active read', async () => {
+  let calls=0,finish;const data=finalData();
+  const h=browserHarness({hash:'#board-final',fetch:async()=>{calls++;if(calls===1)return new Promise(resolve=>{finish=()=>resolve(data);});return data;}});
+  h.run("route='board-final';boardStage='final';routeVersion=1;");
+  const reading=h.run('renderBoard(1)');
+  h.dispatch('storage',{key:'chuyi-score-updated'});
+  assert.equal(calls,1);
+  finish();await reading;
+  await h.fireTimer(0);
+  assert.equal(calls,2);
+  assert.ok([...h.timers.values()].some(t=>t.delay===1000));
 });
 
 test('organizer can confirm MVP and four awards only after complete judging and closure', () => {
@@ -340,13 +491,13 @@ test('board polling waits for each request, preserves stale data, then recovers 
   h.run("route='board-final';boardStage='final';routeVersion=1;");
   const initial=h.run('renderBoard(1)');
   assert.equal(calls,1);
-  assert.ok(![...h.timers.values()].some(t=>t.delay===2000));
+  assert.ok(![...h.timers.values()].some(t=>t.delay===1000));
   finish();await initial;
   const original=h.element('board-content').innerHTML;
-  await h.fireTimer(2000);
+  await h.fireTimer(1000);
   assert.equal(h.element('board-content').innerHTML,original);
   assert.match(h.element('live-status').textContent,/显示上次数据，正在重试/);
-  await h.fireTimer(2000);
+  await h.fireTimer(1000);
   assert.match(h.element('board-content').innerHTML,/520\.00/);
   assert.match(h.element('live-status').innerHTML,/已连接/);
   assert.equal(calls,3);
